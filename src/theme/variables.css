@@ -1,0 +1,308 @@
+/* Thème Liste Courses — sombre coloré par défaut, clair en repli.
+   Le sombre s'active via la classe `ion-palette-dark` (services/theme.ts).
+   `:root` = sombre (défaut, pas de flash), `html:not(.ion-palette-dark)` = clair. */
+
+:root {
+  --ion-safe-area-top: env(safe-area-inset-top);
+  --ion-safe-area-bottom: env(safe-area-inset-bottom);
+
+  /* ---------- Primaire émeraude + accents vitaminés ---------- */
+  --ion-color-primary: #34d399;
+  --ion-color-primary-rgb: 52, 211, 153;
+  --ion-color-primary-contrast: #052e22;
+  --ion-color-primary-contrast-rgb: 5, 46, 34;
+  --ion-color-primary-shade: #10b981;
+  --ion-color-primary-tint: #6ee7b7;
+
+  --ion-color-secondary: #a78bfa;
+  --ion-color-secondary-rgb: 167, 139, 250;
+  --ion-color-secondary-contrast: #1e1b3a;
+  --ion-color-secondary-contrast-rgb: 30, 27, 58;
+  --ion-color-secondary-shade: #8b5cf6;
+  --ion-color-secondary-tint: #c4b5fd;
+
+  --ion-color-tertiary: #22d3ee;
+  --ion-color-tertiary-rgb: 34, 211, 238;
+  --ion-color-tertiary-contrast: #083344;
+  --ion-color-tertiary-contrast-rgb: 8, 51, 68;
+  --ion-color-tertiary-shade: #06b6d4;
+  --ion-color-tertiary-tint: #67e8f9;
+
+  --ion-color-success: #4ade80;
+  --ion-color-warning: #fbbf24;
+  --ion-color-danger: #fb7185;
+  --ion-color-medium: #9aa3c7;
+  --ion-color-medium-rgb: 154, 163, 199;
+  --ion-color-light: #232845;
+  --ion-color-dark: #0f1120;
+
+  /* ---------- Fonds sombres avec halos colorés ---------- */
+  --ion-background-color: #0f1120;
+  --ion-background-color-rgb: 15, 17, 32;
+  --ion-text-color: #f1f3ff;
+  --ion-text-color-rgb: 241, 243, 255;
+  --ion-border-color: rgba(148, 163, 255, 0.16);
+  --ion-card-background: #1a1e35;
+  --ion-toolbar-background: #151833;
+  --ion-tab-bar-background: rgba(17, 20, 38, 0.92);
+  --ion-item-background: transparent;
+
+  --app-card: #1a1e35;
+  --app-border: rgba(148, 163, 255, 0.16);
+  --app-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  --app-radius: 18px;
+  --app-gradient: linear-gradient(135deg, #34d399 0%, #22d3ee 100%);
+  --app-gradient-warm: linear-gradient(135deg, #fbbf24 0%, #fb7185 100%);
+  --app-gradient-cool: linear-gradient(135deg, #a78bfa 0%, #22d3ee 100%);
+}
+
+html.ion-palette-dark {
+  color-scheme: dark;
+}
+
+/* ---------- Thème clair (repli si choisi dans Réglages) ---------- */
+html:not(.ion-palette-dark) {
+  --ion-color-primary: #16a34a;
+  --ion-color-primary-rgb: 22, 163, 74;
+  --ion-color-primary-contrast: #ffffff;
+  --ion-color-primary-contrast-rgb: 255, 255, 255;
+  --ion-color-primary-shade: #15803d;
+  --ion-color-primary-tint: #22c55e;
+
+  --ion-color-secondary: #7c3aed;
+  --ion-color-secondary-contrast: #ffffff;
+  --ion-color-tertiary: #0891b2;
+  --ion-color-tertiary-contrast: #ffffff;
+  --ion-color-medium: #64748b;
+  --ion-color-light: #eef2f0;
+
+  --ion-background-color: #f2f5f3;
+  --ion-text-color: #14231b;
+  --ion-border-color: #dde7e1;
+  --ion-card-background: #ffffff;
+  --ion-toolbar-background: #ffffff;
+  --ion-tab-bar-background: rgba(255, 255, 255, 0.94);
+
+  --app-card: #ffffff;
+  --app-border: #dde7e1;
+  --app-shadow: 0 8px 24px rgba(20, 35, 27, 0.1);
+}
+
+/* ---------- Fond ---------- */
+ion-content {
+  --background: var(--ion-background-color);
+}
+html.ion-palette-dark ion-content::part(background),
+html.ion-palette-dark .ion-page {
+  background:
+    radial-gradient(420px 200px at 8% -40px, rgba(52, 211, 153, 0.16), transparent 70%),
+    radial-gradient(420px 220px at 95% -30px, rgba(167, 139, 250, 0.18), transparent 70%),
+    radial-gradient(500px 260px at 50% 110%, rgba(34, 211, 238, 0.1), transparent 70%),
+    var(--ion-background-color);
+}
+
+/* ---------- Toolbar ---------- */
+ion-toolbar {
+  --border-color: var(--app-border);
+}
+html.ion-palette-dark ion-toolbar {
+  --background: linear-gradient(180deg, #1b2040 0%, #151833 100%);
+  --color: #f1f3ff;
+}
+
+/* ---------- Boutons dégradés ---------- */
+ion-button {
+  --border-radius: 14px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+html.ion-palette-dark ion-button:not([fill='clear']):not([fill='outline']) {
+  --background: var(--app-gradient);
+  --background-activated: linear-gradient(135deg, #10b981 0%, #06b6d4 100%);
+  --color: #052e22;
+  --box-shadow: 0 6px 18px rgba(52, 211, 153, 0.35);
+}
+html.ion-palette-dark ion-button[fill='outline'] {
+  --border-color: rgba(52, 211, 153, 0.55);
+  --color: #6ee7b7;
+}
+
+/* ---------- Onglets : une couleur par univers ---------- */
+ion-tab-bar {
+  --border: 1px solid var(--app-border);
+  --background: var(--ion-tab-bar-background);
+  backdrop-filter: blur(14px);
+}
+ion-tab-button {
+  --color: var(--ion-color-medium);
+}
+ion-tab-button[tab='listes'].tab-selected {
+  --color-selected: #fbbf24;
+}
+ion-tab-button[tab='frigo'].tab-selected {
+  --color-selected: #22d3ee;
+}
+ion-tab-button[tab='reglages'].tab-selected {
+  --color-selected: #a78bfa;
+}
+html:not(.ion-palette-dark) ion-tab-button[tab='listes'].tab-selected {
+  --color-selected: #d97706;
+}
+html:not(.ion-palette-dark) ion-tab-button[tab='frigo'].tab-selected {
+  --color-selected: #0891b2;
+}
+html:not(.ion-palette-dark) ion-tab-button[tab='reglages'].tab-selected {
+  --color-selected: #7c3aed;
+}
+
+/* ---------- Cartes ---------- */
+ion-card {
+  border-radius: var(--app-radius);
+  box-shadow: var(--app-shadow);
+  border: 1px solid var(--app-border);
+  background: var(--app-card);
+}
+ion-card-title {
+  background: var(--app-gradient-cool);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-weight: 800;
+}
+
+/* ---------- Champs ---------- */
+ion-input,
+ion-textarea,
+ion-select {
+  --highlight-color-focused: #22d3ee;
+  font-size: 16px; /* iOS : pas de zoom auto au focus */
+}
+html.ion-palette-dark ion-input,
+html.ion-palette-dark ion-textarea {
+  --background: rgba(255, 255, 255, 0.05);
+  --padding-start: 12px;
+  --padding-end: 12px;
+  border-radius: 12px;
+}
+
+/* ---------- Cases à cocher ---------- */
+ion-checkbox {
+  --size: 24px;
+  --border-radius: 8px;
+  --border-color: rgba(154, 163, 199, 0.6);
+  --checkbox-background-checked: linear-gradient(135deg, #34d399, #22d3ee);
+  --checkmark-color: #052e22;
+  --checkmark-width: 3px;
+}
+
+/* ---------- Segments ---------- */
+ion-segment {
+  --background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  margin: 12px 12px 4px;
+}
+html.ion-palette-dark ion-segment-button.segment-button-checked {
+  --background-checked: var(--app-gradient);
+  --color-checked: #052e22;
+  --indicator-color: transparent;
+  font-weight: 700;
+}
+
+/* ---------- Listes / items ---------- */
+ion-list {
+  background: transparent;
+}
+ion-item {
+  --border-color: var(--app-border);
+  border-radius: 12px;
+}
+ion-item-sliding {
+  margin: 4px 8px;
+  border-radius: 12px;
+}
+html.ion-palette-dark ion-item-sliding ion-item {
+  --background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(148, 163, 255, 0.1);
+}
+
+/* ---------- Puces ---------- */
+ion-chip {
+  font-weight: 600;
+}
+html.ion-palette-dark ion-chip[color='primary'] {
+  --background: rgba(52, 211, 153, 0.16);
+  --color: #6ee7b7;
+}
+html.ion-palette-dark ion-chip[color='success'] {
+  --background: rgba(74, 222, 128, 0.16);
+  --color: #86efac;
+}
+
+/* ---------- Blocs applicatifs ---------- */
+.status-bar {
+  font-size: 12px;
+  color: var(--ion-color-medium);
+  padding: 10px 14px;
+  margin: 12px;
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-left: 3px solid #a78bfa;
+  border-radius: 12px;
+}
+.photo-preview {
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  border-radius: var(--app-radius);
+  background: var(--app-border);
+  border: 1px solid rgba(34, 211, 238, 0.4);
+  box-shadow: 0 0 24px rgba(34, 211, 238, 0.18);
+}
+ion-thumbnail {
+  --border-radius: 10px;
+  border: 1px solid var(--app-border);
+}
+.footer-message {
+  font-size: 12px;
+  margin: 0 14px 10px;
+}
+ion-refresher {
+  --color: #22d3ee;
+}
+ion-spinner {
+  --color: #34d399;
+}
+h3 {
+  color: var(--ion-text-color);
+}
+
+/* ---------- Filming natif (camera-preview par-dessus) : masque le chrome ---------- */
+html.camera-preview-active ion-header,
+html.camera-preview-active ion-tab-bar {
+  display: none !important;
+}
+.film-overlay {
+  position: fixed;
+  inset: auto 0 0 0;
+  z-index: 99999;
+  padding: 18px 18px calc(18px + env(safe-area-inset-bottom));
+  background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.72));
+  color: #fff;
+  text-align: center;
+}
+.film-rec {
+  display: inline-block;
+  font-weight: 800;
+  font-size: 1.1rem;
+  letter-spacing: 0.06em;
+  color: #fff;
+  background: rgba(220, 38, 38, 0.9);
+  border-radius: 999px;
+  padding: 6px 16px;
+  margin-bottom: 8px;
+  animation: film-blink 1.2s ease-in-out infinite;
+}
+@keyframes film-blink {
+  50% { opacity: 0.55; }
+}

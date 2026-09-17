@@ -1,0 +1,8 @@
+{
+  "name": "liste-courses-ionic",
+  "integrations": {
+    "capacitor": {}
+  },
+  "type": "custom",
+  "id": "com.famille.listecourses"
+}
