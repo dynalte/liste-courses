@@ -18,20 +18,40 @@
     Actions publiques (sans session) :
       GET  ?action=ping
       POST ?action=register {email, password, name, familyName}
+        → DÉSACTIVÉ par défaut (ALLOW_REGISTER=false) : inscriptions fermées,
+          les membres rejoignent via join + code d'invitation.
       POST ?action=login    {email, password}
       POST ?action=join     {email, password, name, inviteCode}
 
     Actions authentifiées (header X-Session-Token ou ?session=) :
       GET  ?action=me
       POST ?action=invite_rotate                       → nouveau code (owner uniquement)
+      POST ?action=family_set_gemini {key, model}       → clé IA partagée (owner)
       GET  ?action=lists_get                           → listes + items de la famille
-      POST ?action=lists_create {name}
+                                                  + activity (15 derniers événements :
+                                                    qui a fait quoi) + you (id courant)
+      Listes (cycle de vie : modèle → semaine → archive) :
+      POST ?action=lists_create {name, isTemplate?}       (owner)
+      POST ?action=lists_duplicate {listId, name?, asTemplate?}
+             → nouvelle semaine depuis modèle/archive (tous), ou
+               enregistrement comme modèle (owner). Articles décochés, prix à 0.
+      POST ?action=lists_set_archived {listId, archived}  (tous : clôturer/rouvrir)
+      POST ?action=lists_delete {listId}                  (owner)
       POST ?action=items_add {listId, name, qty?}
       POST ?action=items_add_many {listId, names:[...]} → ajout en masse (frigo IA,
         liste manuscrite). names accepte "Lait" ou {name, qty}.
       POST ?action=items_toggle {itemId, checked}
+      POST ?action=items_update {itemId, name?, qty?, price?, rayon?}
       POST ?action=items_delete {itemId}
       POST ?action=items_clear_checked {listId}
+      POST ?action=mc_recipe {recipeId|url, cookie, lang?} → recette Monsieur
+        Cuisine (via proxy-api, cookie Lidl Plus fourni à chaque appel, jamais
+        stocké) : {id, title, servings, groups:[{name, items:[{name,qty,optional}]}]}
+      POST ?action=mc_search {q?, page?, lang?} → catalogue public MC :
+        {total, totalPage, currentPage, recipes:[{id,name,image,complexity,
+        prep,duration,rating,ratings,categories,url}]} (vide q = nouveautés)
+      POST ?action=mc_session {cookie, lang?} → valide la session MC :
+        {user} (distingue cookie invalide / recette introuvable)
       POST ?action=logout
 */
 declare(strict_types=1);
@@ -39,6 +59,10 @@ declare(strict_types=1);
 // ================= CONFIG =================
 const DB_FILE = __DIR__ . '/data/liste-courses.sqlite';
 const SESSION_TTL = 365 * 24 * 3600; // 1 an
+// Création de nouvelles familles : false = inscription fermée
+// (les membres rejoignent via ?action=join + code d'invitation).
+// Passer à true pour rouvrir les inscriptions.
+const ALLOW_REGISTER = false;
 // ==========================================
 
 header('Content-Type: application/json; charset=utf-8');
@@ -148,6 +172,36 @@ try {
     );
     $db->exec('CREATE INDEX IF NOT EXISTS idx_items_list ON items(list_id)');
     $db->exec('CREATE INDEX IF NOT EXISTS idx_users_family ON users(family_id)');
+    // Migrations douces (colonnes ajoutées après coup).
+    foreach ([
+        'ALTER TABLE items ADD COLUMN price REAL NOT NULL DEFAULT 0',
+        "ALTER TABLE items ADD COLUMN rayon TEXT NOT NULL DEFAULT 'Divers'",
+        'ALTER TABLE lists ADD COLUMN is_template INTEGER NOT NULL DEFAULT 0',
+        'ALTER TABLE lists ADD COLUMN archived INTEGER NOT NULL DEFAULT 0',
+        'ALTER TABLE lists ADD COLUMN archived_at INTEGER NOT NULL DEFAULT 0',
+        "ALTER TABLE families ADD COLUMN gemini_key TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE families ADD COLUMN gemini_model TEXT NOT NULL DEFAULT ''",
+    ] as $sql) {
+        try {
+            $db->exec($sql);
+        } catch (Throwable $e) { /* déjà présente */
+        }
+    }
+    // Journal d'activité (qui a fait quoi) pour le temps réel côté app.
+    // user_name dénormalisé : l'historique survit aux changements de profil.
+    $db->exec(
+        'CREATE TABLE IF NOT EXISTS activity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            family_id INTEGER NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL,
+            user_name TEXT NOT NULL,
+            action TEXT NOT NULL,
+            item_name TEXT NOT NULL DEFAULT \'\',
+            list_name TEXT NOT NULL DEFAULT \'\',
+            created_at INTEGER NOT NULL
+        )'
+    );
+    $db->exec('CREATE INDEX IF NOT EXISTS idx_activity_family ON activity(family_id, id)');
 } catch (Throwable $e) {
     fail('SQLite indisponible (php-sqlite3 ? dossier data/ writable ?) : ' . $e->getMessage(), 500);
 }
@@ -161,6 +215,7 @@ if ($action === 'ping') {
 
 // ---------- inscription : crée famille + owner + liste "Courses" ----------
 if ($action === 'register') {
+    if (!ALLOW_REGISTER) fail('Création de famille désactivée : demande le code d’invitation à un membre.', 403);
     $b = body();
     $email = strtolower(trim((string) ($b['email'] ?? '')));
     $password = (string) ($b['password'] ?? '');
@@ -292,6 +347,9 @@ function family_payload(PDO $db, int $famId): array
     return [
         'id' => (int) $fam['id'], 'name' => (string) $fam['name'],
         'inviteCode' => (string) $fam['invite_code'], 'members' => $members,
+        // Clé Gemini partagée : poussée aux apps à la connexion (me/register/join).
+        'geminiKey' => (string) ($fam['gemini_key'] ?? ''),
+        'geminiModel' => (string) ($fam['gemini_model'] ?? ''),
     ];
 }
 
@@ -304,6 +362,34 @@ function require_family_list(PDO $db, array $user, int $listId): array
     if (!$list) fail('Liste introuvable.', 404);
     if ((int) $list['family_id'] !== (int) $user['family_id']) fail('Liste d’une autre famille.', 403);
     return $list;
+}
+
+/**
+ * Journal d'activité (best effort, jamais bloquant).
+ * Actions : list_create | add | add_many | check | uncheck | edit | delete | clear
+ *   | duplicate | template | archive | unarchive | delete_list.
+ * Pour add_many/clear, item_name porte le nombre ("3") — voir client.
+ */
+function log_activity(PDO $db, array $user, string $action, string $item = '', string $list = ''): void
+{
+    try {
+        $db->prepare(
+            'INSERT INTO activity (family_id, user_id, user_name, action, item_name, list_name, created_at)
+             VALUES (:f, :u, :n, :a, :i, :l, :t)'
+        )->execute([
+            ':f' => (int) $user['family_id'], ':u' => (int) $user['id'],
+            ':n' => mb_substr((string) $user['name'], 0, 60), ':a' => $action,
+            ':i' => mb_substr($item, 0, 120), ':l' => mb_substr($list, 0, 60),
+            ':t' => time(),
+        ]);
+        // Plafond : 100 dernières entrées par famille.
+        $famId = (int) $user['family_id'];
+        $db->exec(
+            'DELETE FROM activity WHERE family_id = ' . $famId .
+            ' AND id NOT IN (SELECT id FROM activity WHERE family_id = ' . $famId . ' ORDER BY id DESC LIMIT 100)'
+        );
+    } catch (Throwable $e) { /* ignore */
+    }
 }
 
 if (!in_array($action, $PUBLIC, true)) {
@@ -342,9 +428,26 @@ if ($action === 'invite_rotate') {
     out(['ok' => true, 'inviteCode' => $code]);
 }
 
+/**
+ * Clé Gemini partagée de la famille (owner uniquement).
+ * Poussée aux apps via me/register/join → plus de saisie par appareil.
+ */
+if ($action === 'family_set_gemini') {
+    $u = require_user($db);
+    if (($u['role'] ?? '') !== 'owner') fail('Seul le créateur peut changer la clé IA.', 403);
+    $b = body();
+    $key = trim((string) ($b['key'] ?? ''));
+    $model = trim((string) ($b['model'] ?? ''));
+    if (mb_strlen($key) > 200) $key = mb_substr($key, 0, 200);
+    if (mb_strlen($model) > 80) $model = mb_substr($model, 0, 80);
+    $db->prepare('UPDATE families SET gemini_key = :k, gemini_model = :m WHERE id = :id')
+        ->execute([':k' => $key, ':m' => $model, ':id' => (int) $u['family_id']]);
+    out(['ok' => true]);
+}
+
 if ($action === 'lists_get') {
     $u = require_user($db);
-    $st = $db->prepare('SELECT * FROM lists WHERE family_id = :f ORDER BY created_at ASC');
+    $st = $db->prepare('SELECT * FROM lists WHERE family_id = :f ORDER BY archived ASC, is_template ASC, created_at ASC');
     $st->execute([':f' => (int) $u['family_id']]);
     $lists = [];
     // Noms des membres pour "ajouté par".
@@ -360,27 +463,108 @@ if ($action === 'lists_get') {
             $items[] = [
                 'id' => (int) $it['id'], 'listId' => (int) $it['list_id'],
                 'name' => (string) $it['name'], 'qty' => (string) $it['qty'],
+                'price' => isset($it['price']) ? (float) $it['price'] : 0.0,
+                'rayon' => isset($it['rayon']) && (string) $it['rayon'] !== '' ? (string) $it['rayon'] : 'Divers',
                 'checked' => ((int) $it['checked']) === 1,
                 'addedBy' => (int) $it['added_by'],
                 'addedByName' => $names[(int) $it['added_by']] ?? '',
                 'createdAt' => (int) $it['created_at'], 'updatedAt' => (int) $it['updated_at'],
             ];
         }
-        $lists[] = ['id' => (int) $l['id'], 'familyId' => (int) $l['family_id'], 'name' => (string) $l['name'], 'items' => $items];
+        $lists[] = [
+            'id' => (int) $l['id'], 'familyId' => (int) $l['family_id'], 'name' => (string) $l['name'],
+            'isTemplate' => ((int) ($l['is_template'] ?? 0)) === 1,
+            'archived' => ((int) ($l['archived'] ?? 0)) === 1,
+            'archivedAt' => (int) ($l['archived_at'] ?? 0),
+            'items' => $items,
+        ];
     }
-    out(['ok' => true, 'lists' => $lists]);
+    // Fil d'activité pour le temps réel (15 dernières, ordre chrono).
+    $as = $db->prepare('SELECT * FROM activity WHERE family_id = :f ORDER BY id DESC LIMIT 15');
+    $as->execute([':f' => (int) $u['family_id']]);
+    $activity = [];
+    foreach (array_reverse($as->fetchAll(PDO::FETCH_ASSOC)) as $a) {
+        $activity[] = [
+            'id' => (int) $a['id'], 'userId' => (int) $a['user_id'],
+            'actor' => (string) $a['user_name'], 'action' => (string) $a['action'],
+            'item' => (string) $a['item_name'], 'list' => (string) $a['list_name'],
+            'at' => (int) $a['created_at'],
+        ];
+    }
+    out(['ok' => true, 'lists' => $lists, 'activity' => $activity, 'you' => (int) $u['id'], 'youRole' => (string) $u['role']]);
 }
 
 if ($action === 'lists_create') {
     $u = require_user($db);
+    if (($u['role'] ?? '') !== 'owner') fail('Seul le créateur de la famille peut créer une liste.', 403);
     $b = body();
     $name = trim((string) ($b['name'] ?? ''));
+    $isTemplate = !empty($b['isTemplate']);
     if ($name === '') fail('Nom de liste requis.', 400);
     if (mb_strlen($name) > 60) $name = mb_substr($name, 0, 60);
-    $db->prepare('INSERT INTO lists (family_id, name, created_at) VALUES (:f,:n,:t)')
-        ->execute([':f' => (int) $u['family_id'], ':n' => $name, ':t' => time()]);
+    $db->prepare('INSERT INTO lists (family_id, name, is_template, archived, archived_at, created_at) VALUES (:f,:n,:t,0,0,:c)')
+        ->execute([':f' => (int) $u['family_id'], ':n' => $name, ':t' => $isTemplate ? 1 : 0, ':c' => time()]);
     $id = (int) $db->lastInsertId();
-    out(['ok' => true, 'list' => ['id' => $id, 'familyId' => (int) $u['family_id'], 'name' => $name, 'items' => []]]);
+    log_activity($db, $u, $isTemplate ? 'template' : 'list_create', $name, '');
+    out(['ok' => true, 'list' => ['id' => $id, 'familyId' => (int) $u['family_id'], 'name' => $name, 'isTemplate' => $isTemplate, 'archived' => false, 'archivedAt' => 0, 'items' => []]]);
+}
+
+/**
+ * Duplique une liste : nouvelle semaine depuis un modèle/une archive
+ * (tout membre), ou enregistrement comme modèle (owner).
+ * Les articles repartent décochés, prix remis à zéro.
+ */
+if ($action === 'lists_duplicate') {
+    $u = require_user($db);
+    $b = body();
+    $listId = (int) ($b['listId'] ?? 0);
+    $name = trim((string) ($b['name'] ?? ''));
+    $asTemplate = !empty($b['asTemplate']);
+    if ($listId <= 0) fail('Liste source requise.', 400);
+    if ($asTemplate && ($u['role'] ?? '') !== 'owner') fail('Seul le créateur peut enregistrer un modèle.', 403);
+    $src = require_family_list($db, $u, $listId);
+    if ($name === '') $name = trim((string) $src['name']) . ($asTemplate ? ' (modèle)' : ' (copie)');
+    if (mb_strlen($name) > 60) $name = mb_substr($name, 0, 60);
+    $db->prepare('INSERT INTO lists (family_id, name, is_template, archived, archived_at, created_at) VALUES (:f,:n,:t,0,0,:c)')
+        ->execute([':f' => (int) $u['family_id'], ':n' => $name, ':t' => $asTemplate ? 1 : 0, ':c' => time()]);
+    $newId = (int) $db->lastInsertId();
+    $is = $db->prepare('SELECT name, qty, rayon FROM items WHERE list_id = :l');
+    $is->execute([':l' => $listId]);
+    $ins = $db->prepare('INSERT INTO items (list_id, name, qty, price, rayon, checked, added_by, created_at, updated_at) VALUES (:l,:n,:q,0,:r,0,:u,:t,:t)');
+    $copied = 0;
+    foreach ($is->fetchAll(PDO::FETCH_ASSOC) as $it) {
+        $ins->execute([':l' => $newId, ':n' => (string) $it['name'], ':q' => (string) $it['qty'], ':r' => (string) $it['rayon'], ':u' => (int) $u['id'], ':t' => time()]);
+        $copied++;
+    }
+    log_activity($db, $u, $asTemplate ? 'template' : 'duplicate', $name, (string) $src['name']);
+    out(['ok' => true, 'list' => ['id' => $newId, 'isTemplate' => $asTemplate, 'copied' => $copied]]);
+}
+
+/** Clôturer (archiver) / rouvrir une liste — tout membre (le flux hebdo). */
+if ($action === 'lists_set_archived') {
+    $u = require_user($db);
+    $b = body();
+    $listId = (int) ($b['listId'] ?? 0);
+    $archived = !empty($b['archived']);
+    $list = require_family_list($db, $u, $listId);
+    if (((int) $list['is_template']) === 1) fail('On ne clôture pas un modèle.', 400);
+    $db->prepare('UPDATE lists SET archived = :a, archived_at = :t WHERE id = :id')
+        ->execute([':a' => $archived ? 1 : 0, ':t' => $archived ? time() : 0, ':id' => $listId]);
+    log_activity($db, $u, $archived ? 'archive' : 'unarchive', (string) $list['name'], '');
+    out(['ok' => true]);
+}
+
+/** Supprimer définitivement une liste + ses articles + son activité liée — owner. */
+if ($action === 'lists_delete') {
+    $u = require_user($db);
+    if (($u['role'] ?? '') !== 'owner') fail('Seul le créateur peut supprimer une liste.', 403);
+    $b = body();
+    $listId = (int) ($b['listId'] ?? 0);
+    $list = require_family_list($db, $u, $listId);
+    $db->prepare('DELETE FROM items WHERE list_id = :l')->execute([':l' => $listId]);
+    $db->prepare('DELETE FROM lists WHERE id = :id')->execute([':id' => $listId]);
+    log_activity($db, $u, 'delete_list', (string) $list['name'], '');
+    out(['ok' => true]);
 }
 
 if ($action === 'items_add') {
@@ -389,14 +573,18 @@ if ($action === 'items_add') {
     $listId = (int) ($b['listId'] ?? 0);
     $name = trim((string) ($b['name'] ?? ''));
     $qty = trim((string) ($b['qty'] ?? ''));
+    $price = max(0.0, (float) ($b['price'] ?? 0));
+    $rayon = trim((string) ($b['rayon'] ?? 'Divers'));
     if ($listId <= 0 || $name === '') fail('Liste et nom requis.', 400);
-    require_family_list($db, $u, $listId);
+    $list = require_family_list($db, $u, $listId);
     if (mb_strlen($name) > 120) $name = mb_substr($name, 0, 120);
     if (mb_strlen($qty) > 30) $qty = mb_substr($qty, 0, 30);
-    $db->prepare('INSERT INTO items (list_id, name, qty, checked, added_by, created_at, updated_at) VALUES (:l,:n,:q,0,:u,:t,:t)')
-        ->execute([':l' => $listId, ':n' => $name, ':q' => $qty, ':u' => (int) $u['id'], ':t' => time()]);
+    if ($rayon === '' || mb_strlen($rayon) > 40) $rayon = 'Divers';
+    $db->prepare('INSERT INTO items (list_id, name, qty, price, rayon, checked, added_by, created_at, updated_at) VALUES (:l,:n,:q,:p,:r,0,:u,:t,:t)')
+        ->execute([':l' => $listId, ':n' => $name, ':q' => $qty, ':p' => $price, ':r' => $rayon, ':u' => (int) $u['id'], ':t' => time()]);
     $id = (int) $db->lastInsertId();
-    out(['ok' => true, 'item' => ['id' => $id, 'listId' => $listId, 'name' => $name, 'qty' => $qty, 'checked' => false]]);
+    log_activity($db, $u, 'add', $qty !== '' ? "$name ($qty)" : $name, (string) $list['name']);
+    out(['ok' => true, 'item' => ['id' => $id, 'listId' => $listId, 'name' => $name, 'qty' => $qty, 'price' => $price, 'rayon' => $rayon, 'checked' => false]]);
 }
 
 if ($action === 'items_add_many') {
@@ -405,24 +593,71 @@ if ($action === 'items_add_many') {
     $listId = (int) ($b['listId'] ?? 0);
     $names = $b['names'] ?? [];
     if ($listId <= 0 || !is_array($names)) fail('Liste et noms requis.', 400);
-    require_family_list($db, $u, $listId);
-    $ins = $db->prepare('INSERT INTO items (list_id, name, qty, checked, added_by, created_at, updated_at) VALUES (:l,:n,:q,0,:u,:t,:t)');
+    $list = require_family_list($db, $u, $listId);
+    $ins = $db->prepare('INSERT INTO items (list_id, name, qty, price, rayon, checked, added_by, created_at, updated_at) VALUES (:l,:n,:q,:p,:r,0,:u,:t,:t)');
     $added = 0;
-    // names accepte "Lait" ou {name:"Lait", qty:"2"} (transcription manuscrite IA).
+    // names accepte "Lait" ou {name:"Lait", qty:"2", price:1.5, rayon:"Frais"}.
     foreach (array_slice($names, 0, 50) as $n) {
         $qty = '';
+        $price = 0.0;
+        $rayon = 'Divers';
         if (is_array($n)) {
             $qty = trim((string) ($n['qty'] ?? ''));
+            $price = max(0.0, (float) ($n['price'] ?? 0));
+            $rayon = trim((string) ($n['rayon'] ?? 'Divers'));
             $n = (string) ($n['name'] ?? '');
         }
         $n = trim((string) $n);
         if ($n === '') continue;
         if (mb_strlen($n) > 120) $n = mb_substr($n, 0, 120);
         if (mb_strlen($qty) > 30) $qty = mb_substr($qty, 0, 30);
-        $ins->execute([':l' => $listId, ':n' => $n, ':q' => $qty, ':u' => (int) $u['id'], ':t' => time()]);
+        if ($rayon === '' || mb_strlen($rayon) > 40) $rayon = 'Divers';
+        $ins->execute([':l' => $listId, ':n' => $n, ':q' => $qty, ':p' => $price, ':r' => $rayon, ':u' => (int) $u['id'], ':t' => time()]);
         $added++;
     }
+    if ($added > 0) log_activity($db, $u, 'add_many', (string) $added, (string) $list['name']);
     out(['ok' => true, 'added' => $added]);
+}
+
+if ($action === 'items_update') {
+    $u = require_user($db);
+    $b = body();
+    $itemId = (int) ($b['itemId'] ?? 0);
+    $st = $db->prepare('SELECT it.*, l.family_id AS fam, l.name AS list_name FROM items it JOIN lists l ON l.id = it.list_id WHERE it.id = :id');
+    $st->execute([':id' => $itemId]);
+    $it = $st->fetch(PDO::FETCH_ASSOC);
+    if (!$it) fail('Article introuvable.', 404);
+    if ((int) $it['fam'] !== (int) $u['family_id']) fail('Article d’une autre famille.', 403);
+    $sets = [];
+    $params = [':id' => $itemId, ':t' => time()];
+    if (array_key_exists('name', $b)) {
+        $name = trim((string) $b['name']);
+        if ($name === '') fail('Nom vide.', 400);
+        if (mb_strlen($name) > 120) $name = mb_substr($name, 0, 120);
+        $sets[] = 'name = :n';
+        $params[':n'] = $name;
+    }
+    if (array_key_exists('qty', $b)) {
+        $qty = trim((string) $b['qty']);
+        if (mb_strlen($qty) > 30) $qty = mb_substr($qty, 0, 30);
+        $sets[] = 'qty = :q';
+        $params[':q'] = $qty;
+    }
+    if (array_key_exists('price', $b)) {
+        $sets[] = 'price = :p';
+        $params[':p'] = max(0.0, (float) $b['price']);
+    }
+    if (array_key_exists('rayon', $b)) {
+        $rayon = trim((string) $b['rayon']);
+        if ($rayon === '' || mb_strlen($rayon) > 40) $rayon = 'Divers';
+        $sets[] = 'rayon = :r';
+        $params[':r'] = $rayon;
+    }
+    if (count($sets) === 0) fail('Rien à modifier.', 400);
+    $sets[] = 'updated_at = :t';
+    $db->prepare('UPDATE items SET ' . implode(', ', $sets) . ' WHERE id = :id')->execute($params);
+    log_activity($db, $u, 'edit', (string) $it['name'], (string) $it['list_name']);
+    out(['ok' => true]);
 }
 
 if ($action === 'items_toggle') {
@@ -430,13 +665,14 @@ if ($action === 'items_toggle') {
     $b = body();
     $itemId = (int) ($b['itemId'] ?? 0);
     $checked = !empty($b['checked']);
-    $st = $db->prepare('SELECT it.*, l.family_id AS fam FROM items it JOIN lists l ON l.id = it.list_id WHERE it.id = :id');
+    $st = $db->prepare('SELECT it.*, l.family_id AS fam, l.name AS list_name FROM items it JOIN lists l ON l.id = it.list_id WHERE it.id = :id');
     $st->execute([':id' => $itemId]);
     $it = $st->fetch(PDO::FETCH_ASSOC);
     if (!$it) fail('Article introuvable.', 404);
     if ((int) $it['fam'] !== (int) $u['family_id']) fail('Article d’une autre famille.', 403);
     $db->prepare('UPDATE items SET checked = :c, updated_at = :t WHERE id = :id')
         ->execute([':c' => $checked ? 1 : 0, ':t' => time(), ':id' => $itemId]);
+    log_activity($db, $u, $checked ? 'check' : 'uncheck', (string) $it['name'], (string) $it['list_name']);
     out(['ok' => true]);
 }
 
@@ -444,12 +680,13 @@ if ($action === 'items_delete') {
     $u = require_user($db);
     $b = body();
     $itemId = (int) ($b['itemId'] ?? 0);
-    $st = $db->prepare('SELECT l.family_id AS fam FROM items it JOIN lists l ON l.id = it.list_id WHERE it.id = :id');
+    $st = $db->prepare('SELECT it.name AS item_name, l.family_id AS fam, l.name AS list_name FROM items it JOIN lists l ON l.id = it.list_id WHERE it.id = :id');
     $st->execute([':id' => $itemId]);
     $it = $st->fetch(PDO::FETCH_ASSOC);
     if (!$it) fail('Article introuvable.', 404);
     if ((int) $it['fam'] !== (int) $u['family_id']) fail('Article d’une autre famille.', 403);
     $db->prepare('DELETE FROM items WHERE id = :id')->execute([':id' => $itemId]);
+    log_activity($db, $u, 'delete', (string) $it['item_name'], (string) $it['list_name']);
     out(['ok' => true]);
 }
 
@@ -457,10 +694,562 @@ if ($action === 'items_clear_checked') {
     $u = require_user($db);
     $b = body();
     $listId = (int) ($b['listId'] ?? 0);
-    require_family_list($db, $u, $listId);
+    $list = require_family_list($db, $u, $listId);
     $st = $db->prepare('DELETE FROM items WHERE list_id = :l AND checked = 1');
     $st->execute([':l' => $listId]);
-    out(['ok' => true, 'deleted' => $st->rowCount()]);
+    $deleted = $st->rowCount();
+    if ($deleted > 0) log_activity($db, $u, 'clear', (string) $deleted, (string) $list['name']);
+    out(['ok' => true, 'deleted' => $deleted]);
 }
 
-fail('Action inconnue (ping, register, login, join, me, logout, invite_rotate, lists_get, lists_create, items_add, items_add_many, items_toggle, items_delete, items_clear_checked).', 400);
+/**
+ * Nettoie un cookie copié depuis DevTools (retours ligne, préfixe "Cookie:").
+ */
+function mc_clean_cookie(string $c): string
+{
+    $c = trim($c);
+    $c = (string) preg_replace('/^cookie\s*:\s*/i', '', $c);
+    $c = str_replace(["\r", "\n", "\t"], '', $c);
+    return trim($c);
+}
+
+/**
+ * Appel proxy-api Monsieur Cuisine (cf. smart-recipe/src/mc/client.ts, MIT).
+ * Retourne [httpCode, data|null]. Échec réseau → fail() 502 direct.
+ */
+function mc_proxy_call(string $cookie, string $endpoint, string $method, string $lang, $payload, string $referer): array
+{
+    $body = ['endpoint' => $endpoint, 'method' => $method, 'lang' => $lang];
+    if ($payload !== null) $body['payload'] = $payload;
+    $json = json_encode($body, JSON_UNESCAPED_UNICODE);
+    $headers = [
+        'Content-Type: application/json',
+        'User-Agent: Mozilla/5.0',
+        'X-Request-ID: ' . bin2hex(random_bytes(16)),
+        'x-bypass-cdn: cd844315-77c4-46ba-83fe-7702d13b12b2',
+        'device-type: web',
+        'Accept-Language: ' . $lang,
+        'Referer: ' . $referer,
+        'Cookie: ' . $cookie,
+    ];
+    $raw = null;
+    $httpCode = 0;
+    if (function_exists('curl_init')) {
+        $ch = curl_init('https://www.monsieur-cuisine.com/proxy-api');
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $json,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_TIMEOUT => 20,
+            CURLOPT_CONNECTTIMEOUT => 10,
+        ]);
+        $raw = curl_exec($ch);
+        $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlErr = (string) curl_error($ch);
+        curl_close($ch);
+        if (!is_string($raw) || $raw === '') fail('Monsieur Cuisine injoignable (' . $curlErr . ').', 502);
+    } else {
+        $ctx = stream_context_create(['http' => [
+            'method' => 'POST',
+            'header' => implode("\r\n", $headers),
+            'content' => $json,
+            'timeout' => 20,
+            'ignore_errors' => true,
+        ]]);
+        $raw = @file_get_contents('https://www.monsieur-cuisine.com/proxy-api', false, $ctx);
+        if (!is_string($raw) || $raw === '') fail('Monsieur Cuisine injoignable.', 502);
+        if (isset($http_response_header[0]) && preg_match('/\s(\d{3})\s/', (string) $http_response_header[0], $m)) {
+            $httpCode = (int) $m[1];
+        }
+    }
+    $data = json_decode((string) $raw, true);
+    return [$httpCode, is_array($data) ? $data : null];
+}
+
+/** Erreur MC standard : 401/403 → cookie, sinon HTTP ou message applicatif. */
+function mc_check_error(int $httpCode, $data): void
+{
+    if ($httpCode === 401 || $httpCode === 403) {
+        fail('Cookie MC refusé (expiré ou incomplet ?) : reconnecte-toi sur monsieur-cuisine.com et recopie TOUT le cookie (Réglages).', 401);
+    }
+    if ($httpCode < 200 || $httpCode >= 300) fail('Monsieur Cuisine : HTTP ' . $httpCode . '.', 502);
+    if ($data === null) fail('Réponse Monsieur Cuisine illisible.', 502);
+    if (($data['code'] ?? null) !== 0) {
+        $msg = (string) ($data['message'] ?? 'erreur inconnue');
+        if (mb_strlen($msg) > 160) $msg = mb_substr($msg, 0, 160);
+        fail('Monsieur Cuisine : ' . $msg, 502);
+    }
+}
+
+if ($action === 'mc_session') {
+    // Valide la session MC seule (sans charger de recette) : permet de
+    // distinguer "cookie invalide" de "recette introuvable".
+    $u = require_user($db);
+    $b = body();
+    $cookie = mc_clean_cookie(trim((string) ($b['cookie'] ?? '')));
+    if ($cookie === '') fail('Cookie Monsieur Cuisine manquant (Réglages > Cookie MC).', 400);
+    if (mb_strlen($cookie) > 4000) fail('Cookie trop long (copie incomplète ?).', 400);
+    $lang = trim((string) ($b['lang'] ?? 'fr-FR'));
+    if (!preg_match('/^[a-z]{2}-[A-Z]{2}$/', $lang)) $lang = 'fr-FR';
+    [$httpCode, $data] = mc_proxy_call(
+        $cookie,
+        'api/v1/users',
+        'GET',
+        $lang,
+        null,
+        'https://www.monsieur-cuisine.com/fr/creer-une-recette?devices=mc-smart'
+    );
+    mc_check_error($httpCode, $data);
+    $user = [];
+    if (isset($data['data']['user']) && is_array($data['data']['user'])) $user = $data['data']['user'];
+    elseif (isset($data['data']) && is_array($data['data'])) $user = $data['data'];
+    $label = '';
+    foreach (['email', 'name', 'username', 'displayName', 'id'] as $k) {
+        if (isset($user[$k]) && (is_string($user[$k]) || is_numeric($user[$k])) && trim((string) $user[$k]) !== '') {
+            $label = trim((string) $user[$k]);
+            break;
+        }
+    }
+    out(['ok' => true, 'user' => $label]);
+}
+
+/**
+ * GET JSON public (mc-api.tecpal.com). Retourne [httpCode, data|null].
+ */
+function mc_http_get(string $url, string $lang): array
+{
+    $headers = ['User-Agent: Mozilla/5.0', 'Accept-Language: ' . $lang, 'device-type: MC3.0'];
+    $httpCode = 0;
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPGET => true,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_TIMEOUT => 15,
+            CURLOPT_CONNECTTIMEOUT => 8,
+        ]);
+        $raw = curl_exec($ch);
+        $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if (!is_string($raw) || $raw === '') return [0, null];
+    } else {
+        $ctx = stream_context_create(['http' => [
+            'method' => 'GET',
+            'header' => implode("\r\n", $headers),
+            'timeout' => 15,
+            'ignore_errors' => true,
+        ]]);
+        $raw = @file_get_contents($url, false, $ctx);
+        if (!is_string($raw) || $raw === '') return [0, null];
+        if (isset($http_response_header[0]) && preg_match('/\s(\d{3})\s/', (string) $http_response_header[0], $m)) {
+            $httpCode = (int) $m[1];
+        }
+    }
+    $data = json_decode((string) $raw, true);
+    return [$httpCode, is_array($data) ? $data : null];
+}
+
+/**
+ * Noms d'ingrédients système MC (id → nom FR), cache fichier 7 j.
+ * Nécessaire car le détail public laisse parfois name=null + systemIngredientId.
+ */
+function mc_sys_names(string $lang): array
+{
+    $safe = preg_replace('/[^a-zA-Z-]/', '', $lang);
+    $file = __DIR__ . '/data/mc-ingredients-' . $safe . '.json';
+    if (is_file($file) && (time() - (int) @filemtime($file)) < 7 * 24 * 3600) {
+        $j = json_decode((string) @file_get_contents($file), true);
+        if (is_array($j)) return $j;
+    }
+    [$httpCode, $data] = mc_http_get('https://mc-api.tecpal.com/api/v2/ingredients', $lang);
+    $map = [];
+    if ($httpCode >= 200 && $httpCode < 300 && is_array($data)) {
+        $list = (isset($data['data']['ingredients']) && is_array($data['data']['ingredients'])) ? $data['data']['ingredients'] : [];
+        foreach ($list as $ing) {
+            if (!is_array($ing) || !isset($ing['id'])) continue;
+            $tr = (isset($ing['translations']) && is_array($ing['translations'])) ? $ing['translations'] : [];
+            $name = '';
+            foreach ([$lang, 'en-US'] as $want) {
+                foreach ($tr as $t) {
+                    if (is_array($t) && ($t['language'] ?? '') === $want && trim((string) ($t['name'] ?? '')) !== '') {
+                        $name = trim((string) $t['name']);
+                        break 2;
+                    }
+                }
+            }
+            if ($name === '') {
+                foreach ($tr as $t) {
+                    if (is_array($t) && trim((string) ($t['name'] ?? '')) !== '') {
+                        $name = trim((string) $t['name']);
+                        break;
+                    }
+                }
+            }
+            if ($name !== '') $map[(string) $ing['id']] = $name;
+        }
+        if (count($map) > 1000) @file_put_contents($file, json_encode($map, JSON_UNESCAPED_UNICODE));
+    }
+    return $map;
+}
+
+/**
+ * Devine les noms d'ingrédients MC inconnus du référentiel (créations de
+ * membres) via Gemini : contexte titre + ingrédients connus + qté/catégorie.
+ * Retourne [idx => nom]. Best effort : échec → tableau vide.
+ */
+function mc_guess_names(string $apiKey, string $model, string $title, array $known, array $unknown): array
+{
+    if ($apiKey === '' || count($unknown) === 0) return [];
+    if (!preg_match('/^[a-zA-Z0-9_.-]{1,60}$/', $model)) $model = 'gemini-2.0-flash';
+    $lines = [];
+    foreach ($unknown as $idx => $u) {
+        $bits = trim((string) ($u['qty'] ?? ''));
+        if (trim((string) ($u['cat'] ?? '')) !== '') $bits .= ($bits !== '' ? ' ' : '') . '(catégorie : ' . trim((string) $u['cat']) . ')';
+        $lines[] = $idx . ': ' . ($bits !== '' ? $bits : 'quantité inconnue');
+    }
+    $prompt = 'Recette Monsieur Cuisine « ' . mb_substr($title, 0, 80) . ' ».' . "\n"
+        . 'Ingrédients connus : ' . implode(' ; ', array_slice($known, 0, 30)) . "\n"
+        . 'Ingrédients à identifier (index : quantité + catégorie) :' . "\n" . implode("\n", $lines) . "\n"
+        . 'Réponds UNIQUEMENT un objet JSON {"index":"nom d’ingrédient en français"} '
+        . '(noms courts de courses, ex : "Farine de blé"). Sans explication.';
+    $body = json_encode([
+        'contents' => [['parts' => [['text' => $prompt]]]],
+        'generationConfig' => ['temperature' => 0.2, 'maxOutputTokens' => 256, 'responseMimeType' => 'application/json'],
+    ], JSON_UNESCAPED_UNICODE);
+    $url = 'https://generativelanguage.googleapis.com/v1beta/models/' . rawurlencode($model) . ':generateContent?key=' . rawurlencode($apiKey);
+    $raw = null;
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $body,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+            CURLOPT_TIMEOUT => 15,
+            CURLOPT_CONNECTTIMEOUT => 8,
+        ]);
+        $raw = curl_exec($ch);
+        curl_close($ch);
+    } else {
+        $ctx = stream_context_create(['http' => [
+            'method' => 'POST',
+            'header' => 'Content-Type: application/json',
+            'content' => $body,
+            'timeout' => 15,
+            'ignore_errors' => true,
+        ]]);
+        $raw = @file_get_contents($url, false, $ctx);
+    }
+    if (!is_string($raw) || $raw === '') return [];
+    $data = json_decode($raw, true);
+    $text = '';
+    if (is_array($data)) {
+        $parts = $data['candidates'][0]['content']['parts'] ?? [];
+        if (is_array($parts)) {
+            foreach ($parts as $p) {
+                if (is_array($p) && isset($p['text'])) $text .= (string) $p['text'];
+            }
+        }
+    }
+    $start = strpos($text, '{');
+    $end = strrpos($text, '}');
+    if ($start === false || $end === false || $end <= $start) return [];
+    $map = json_decode(substr($text, $start, $end - $start + 1), true);
+    if (!is_array($map)) return [];
+    $out = [];
+    foreach ($map as $k => $v) {
+        $nm = trim((string) $v);
+        if ($nm === '' || mb_strlen($nm) > 80) continue;
+        $out[(string) $k] = $nm;
+    }
+    return $out;
+}
+
+if ($action === 'mc_recipe') {
+    // Prototype recettes Monsieur Cuisine → ingrédients.
+    // Chaîne (cf. smart-recipe/src/mc/client.ts, MIT) :
+    //   POST https://www.monsieur-cuisine.com/proxy-api
+    //   {endpoint:"api/v3/auth/user/recipes/<id>", method:"GET", lang}
+    //   + headers Cookie (session Lidl Plus, fournie par l'app à chaque
+    //     appel, jamais stockée), x-bypass-cdn, device-type, Referer.
+    // Réponse : {code:0, data:{recipe:{title, servingSizes:[{amount, unit,
+    //   ingredientGroups:[{name, ingredients:[{amount,unit,name,isOptional}]}]}]}}}.
+    $u = require_user($db);
+    $b = body();
+    $cookie = mc_clean_cookie(trim((string) ($b['cookie'] ?? '')));
+    $recipeId = trim((string) ($b['recipeId'] ?? ''));
+    $url = trim((string) ($b['url'] ?? ''));
+    $lang = trim((string) ($b['lang'] ?? 'fr-FR'));
+    $geminiKey = trim((string) ($b['geminiKey'] ?? ''));
+    $geminiModel = trim((string) ($b['geminiModel'] ?? 'gemini-2.0-flash'));
+    if (mb_strlen($cookie) > 4000) fail('Cookie trop long.', 400);
+    if (!preg_match('/^[a-z]{2}-[A-Z]{2}$/', $lang)) $lang = 'fr-FR';
+    // ID : chiffres seuls, ou ?recipe-id= / ?recipeId= dans l'URL.
+    $id = '';
+    if (preg_match('/^\d{1,12}$/', $recipeId)) {
+        $id = $recipeId;
+    } elseif ($url !== '') {
+        $parts = parse_url($url);
+        if (is_array($parts) && !empty($parts['query'])) {
+            parse_str((string) $parts['query'], $qs);
+            $cand = (string) ($qs['recipe-id'] ?? $qs['recipeId'] ?? '');
+            if (preg_match('/^\d{1,12}$/', $cand)) $id = $cand;
+        }
+        if ($id === '' && preg_match('/^\d{1,12}$/', trim($url))) $id = trim($url);
+    }
+    if ($id === '') fail('ID recette introuvable : colle l’URL monsieur-cuisine.com (…?recipe-id=…) ou l’ID numérique.', 400);
+
+    $title = '';
+    $servings = '';
+    $groups = null;
+    $authInfo = 'non tentée (pas de cookie)';
+    $pubInfo = 'non tentée';
+
+    // 1) Voie authentifiée (brouillons privés) si cookie fourni.
+    if ($cookie !== '') {
+        $referer = 'https://www.monsieur-cuisine.com/fr/creer-une-recette?devices=mc-smart&recipe-id=' . $id;
+        [$httpCode, $data] = mc_proxy_call($cookie, 'api/v3/auth/user/recipes/' . $id, 'GET', $lang, null, $referer);
+        $authInfo = 'HTTP ' . $httpCode;
+        if (is_array($data)) {
+            $authInfo .= ' code=' . (string) ($data['code'] ?? '?') . ' ' . mb_substr((string) ($data['message'] ?? ''), 0, 80);
+        }
+        if ($httpCode >= 200 && $httpCode < 300 && is_array($data) && ($data['code'] ?? null) === 0) {
+            $recipe = (isset($data['data']['recipe']) && is_array($data['data']['recipe'])) ? $data['data']['recipe'] : null;
+            if (!is_array($recipe) && isset($data['data']) && is_array($data['data'])) $recipe = $data['data'];
+            if (is_array($recipe)) {
+                $title = trim((string) ($recipe['title'] ?? $recipe['name'] ?? ''));
+                $serving = [];
+                if (isset($recipe['servingSizes']) && is_array($recipe['servingSizes']) && isset($recipe['servingSizes'][0]) && is_array($recipe['servingSizes'][0])) {
+                    $serving = $recipe['servingSizes'][0];
+                } elseif (isset($recipe['servingSize']) && is_array($recipe['servingSize'])) {
+                    $serving = $recipe['servingSize'];
+                }
+                if (is_numeric($serving['amount'] ?? null)) {
+                    $servings = trim((string) $serving['amount'] . ' ' . trim((string) ($serving['unit'] ?? 'parts')));
+                }
+                $tmp = [];
+                $ig = (isset($serving['ingredientGroups']) && is_array($serving['ingredientGroups'])) ? $serving['ingredientGroups'] : [];
+                foreach ($ig as $g) {
+                    if (!is_array($g)) continue;
+                    $items = [];
+                    $ing = (isset($g['ingredients']) && is_array($g['ingredients'])) ? $g['ingredients'] : [];
+                    foreach ($ing as $in) {
+                        if (!is_array($in)) continue;
+                        $nm = trim((string) ($in['name'] ?? ''));
+                        if ($nm === '') continue;
+                        if (mb_strlen($nm) > 120) $nm = mb_substr($nm, 0, 120);
+                        $qtyParts = [];
+                        $amount = $in['amount'] ?? null;
+                        if (is_int($amount) || is_float($amount)) {
+                            $f = (float) $amount;
+                            $qtyParts[] = (string) ((round($f, 2) == (int) $amount) ? (int) $amount : round($f, 2));
+                        } elseif (is_string($amount) && trim($amount) !== '') {
+                            $qtyParts[] = trim($amount);
+                        }
+                        $unit = trim((string) ($in['unit'] ?? ''));
+                        if ($unit !== '') $qtyParts[] = $unit;
+                        $qty = trim(implode(' ', $qtyParts));
+                        if (mb_strlen($qty) > 30) $qty = mb_substr($qty, 0, 30);
+                        $items[] = ['name' => $nm, 'qty' => $qty, 'optional' => !empty($in['isOptional'])];
+                    }
+                    if (count($items) === 0) continue;
+                    $tmp[] = ['name' => trim((string) ($g['name'] ?? '')), 'items' => $items];
+                }
+                if (count($tmp) > 0) $groups = $tmp;
+            }
+        }
+        // Échec voie auth (401/404/autre) : repli public ci-dessous, sans erreur.
+    }
+
+    // 2) Voie publique (catalogue, sans cookie) : GET mc-api/api/v2/recipes/<id>.
+    //    Ingrédients à plat + ingredientGroupId ; name parfois null → résolu
+    //    via le référentiel système (cache fichier 7 j).
+    if ($groups === null) {
+        [$httpCode, $data] = mc_http_get('https://mc-api.tecpal.com/api/v2/recipes/' . $id, $lang);
+        $pubInfo = 'HTTP ' . $httpCode;
+        if (is_array($data)) {
+            $pubInfo .= ' code=' . (string) ($data['code'] ?? '?') . ' ' . mb_substr((string) ($data['message'] ?? ''), 0, 80);
+        }
+        $recipe = (isset($data['data']['recipe']) && is_array($data['data']['recipe'])) ? $data['data']['recipe'] : null;
+        if ($httpCode >= 200 && $httpCode < 300 && is_array($recipe)) {
+            $title = trim((string) ($recipe['name'] ?? $recipe['title'] ?? ''));
+            $serving = (isset($recipe['servingSizes'][0]) && is_array($recipe['servingSizes'][0])) ? $recipe['servingSizes'][0] : [];
+            if (is_numeric($serving['amount'] ?? null)) {
+                $servings = trim((string) $serving['amount'] . ' ' . trim((string) ($serving['servingUnit'] ?? $serving['unit'] ?? 'parts')));
+            }
+            $gNames = [];
+            $ig = (isset($serving['ingredientGroups']) && is_array($serving['ingredientGroups'])) ? $serving['ingredientGroups'] : [];
+            foreach ($ig as $g) {
+                if (is_array($g) && isset($g['id'])) $gNames[(string) $g['id']] = trim((string) ($g['name'] ?? ''));
+            }
+            $byGroup = [];
+            $order = [];
+            $ing = (isset($serving['ingredients']) && is_array($serving['ingredients'])) ? $serving['ingredients'] : [];
+            $sysNames = null;
+            $unknown = [];
+            $uIdx = 0;
+            foreach ($ing as $in) {
+                if (!is_array($in)) continue;
+                $nm = trim((string) ($in['name'] ?? ''));
+                $cat = '';
+                if (is_array($in['ingredientCategory'] ?? null)) $cat = trim((string) ($in['ingredientCategory']['name'] ?? ''));
+                if ($nm === '' && isset($in['systemIngredientId'])) {
+                    if ($sysNames === null) $sysNames = mc_sys_names($lang);
+                    $nm = trim((string) ($sysNames[(string) $in['systemIngredientId']] ?? ''));
+                }
+                if (mb_strlen($nm) > 120) $nm = mb_substr($nm, 0, 120);
+                $qtyParts = [];
+                $amount = $in['amount'] ?? null;
+                if (is_int($amount) || is_float($amount)) {
+                    $f = (float) $amount;
+                    $qtyParts[] = (string) ((round($f, 2) == (int) $amount) ? (int) $amount : round($f, 2));
+                } elseif (is_string($amount) && trim($amount) !== '') {
+                    $qtyParts[] = trim($amount);
+                }
+                $unit = trim((string) ($in['unit'] ?? ''));
+                if ($unit !== '') $qtyParts[] = $unit;
+                $qty = trim(implode(' ', $qtyParts));
+                if (mb_strlen($qty) > 30) $qty = mb_substr($qty, 0, 30);
+                $gid = (isset($in['ingredientGroupId']) && $in['ingredientGroupId'] !== null) ? (string) $in['ingredientGroupId'] : '';
+                if (!isset($byGroup[$gid])) {
+                    $byGroup[$gid] = [];
+                    $order[] = $gid;
+                }
+                $pos = count($byGroup[$gid]);
+                $byGroup[$gid][] = ['name' => $nm, 'qty' => $qty, 'optional' => false];
+                if ($nm === '') {
+                    $uIdx++;
+                    $unknown['u' . $uIdx] = ['gid' => $gid, 'pos' => $pos, 'qty' => $qty, 'cat' => $cat];
+                }
+            }
+            // Noms manquants (créations de membres hors référentiel) : devinette IA.
+            if (count($unknown) > 0 && $geminiKey !== '') {
+                $known = [];
+                foreach ($byGroup as $items) {
+                    foreach ($items as $it) {
+                        if ($it['name'] !== '') $known[] = trim($it['qty'] . ' ' . $it['name']);
+                    }
+                }
+                $guessed = mc_guess_names($geminiKey, $geminiModel, $title, $known, $unknown);
+                foreach ($unknown as $idx => $ref) {
+                    if (isset($guessed[$idx])) {
+                        $byGroup[$ref['gid']][$ref['pos']]['name'] = $guessed[$idx];
+                    }
+                }
+            }
+            $tmp = [];
+            foreach ($order as $gid) {
+                $items = [];
+                foreach ($byGroup[$gid] as $it) {
+                    if ($it['name'] !== '') $items[] = $it;
+                }
+                if (count($items) === 0) continue;
+                $tmp[] = ['name' => ($gid !== '' ? ($gNames[$gid] ?? '') : ''), 'items' => $items];
+            }
+            if (count($tmp) > 0) $groups = $tmp;
+        }
+    }
+
+    if ($groups === null || count($groups) === 0) {
+        fail('Recette ' . $id . ' introuvable (privé : ' . $authInfo . ' ; public : ' . $pubInfo . ').', 404);
+    }
+    if ($title === '') $title = 'Recette MC ' . $id;
+    out(['ok' => true, 'recipe' => ['id' => $id, 'title' => $title, 'servings' => $servings, 'groups' => $groups]]);
+}
+
+if ($action === 'mc_search') {
+    // Catalogue public Monsieur Cuisine (SHOPPING SANS COMPTE) :
+    //   GET https://mc-api.tecpal.com/api/v1/recipes/search/page/<n>?q=...
+    //   + header Accept-Language (pas de cookie requis).
+    // q vide = nouveautés. 20 résultats/page.
+    $u = require_user($db);
+    $b = body();
+    $q = trim((string) ($b['q'] ?? ''));
+    $page = (int) ($b['page'] ?? 1);
+    $lang = trim((string) ($b['lang'] ?? 'fr-FR'));
+    if ($page < 1) $page = 1;
+    if ($page > 200) $page = 200;
+    if (mb_strlen($q) > 80) $q = mb_substr($q, 0, 80);
+    if (!preg_match('/^[a-z]{2}-[A-Z]{2}$/', $lang)) $lang = 'fr-FR';
+    $params = [
+        'sortBy[0][field]' => 'lastUpdated',
+        'sortBy[0][direction]' => 'DESC',
+    ];
+    if ($q !== '') $params['q'] = $q;
+    $target = 'https://mc-api.tecpal.com/api/v1/recipes/search/page/' . $page . '?' . http_build_query($params);
+    $headers = [
+        'User-Agent: Mozilla/5.0',
+        'Accept-Language: ' . $lang,
+        'device-type: MC3.0',
+    ];
+    $raw = null;
+    if (function_exists('curl_init')) {
+        $ch = curl_init($target);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPGET => true,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_TIMEOUT => 15,
+            CURLOPT_CONNECTTIMEOUT => 8,
+        ]);
+        $raw = curl_exec($ch);
+        $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlErr = (string) curl_error($ch);
+        curl_close($ch);
+        if (!is_string($raw) || $raw === '') fail('Catalogue MC injoignable (' . $curlErr . ').', 502);
+    } else {
+        $ctx = stream_context_create(['http' => [
+            'method' => 'GET',
+            'header' => implode("\r\n", $headers),
+            'timeout' => 15,
+            'ignore_errors' => true,
+        ]]);
+        $raw = @file_get_contents($target, false, $ctx);
+        if (!is_string($raw) || $raw === '') fail('Catalogue MC injoignable.', 502);
+        $httpCode = 0;
+        if (isset($http_response_header[0]) && preg_match('/\s(\d{3})\s/', (string) $http_response_header[0], $m)) {
+            $httpCode = (int) $m[1];
+        }
+    }
+    $data = json_decode((string) $raw, true);
+    if (!is_array($data)) fail('Catalogue MC illisible.', 502);
+    if ($httpCode < 200 || $httpCode >= 300) fail('Catalogue MC : HTTP ' . $httpCode . '.', 502);
+    if (($data['code'] ?? null) !== 0 || !isset($data['data']) || !is_array($data['data'])) {
+        fail('Catalogue MC : ' . mb_substr((string) ($data['message'] ?? 'erreur inconnue'), 0, 160), 502);
+    }
+    $dd = $data['data'];
+    $out = [];
+    $list = (isset($dd['recipes']) && is_array($dd['recipes'])) ? $dd['recipes'] : [];
+    foreach ($list as $r) {
+        if (!is_array($r)) continue;
+        $rid = (string) ($r['id'] ?? '');
+        $nm = trim((string) ($r['name'] ?? ''));
+        if ($rid === '' || $nm === '') continue;
+        $thumb = $r['thumbnail'] ?? [];
+        $img = trim((string) (is_array($thumb) ? ($thumb['landscape'] ?? $thumb['portrait'] ?? '') : ''));
+        $cats = [];
+        if (isset($r['categories']) && is_array($r['categories'])) {
+            foreach ($r['categories'] as $c) {
+                if (is_array($c) && trim((string) ($c['name'] ?? '')) !== '') $cats[] = trim((string) $c['name']);
+            }
+        }
+        $out[] = [
+            'id' => $rid,
+            'name' => (mb_strlen($nm) > 120 ? mb_substr($nm, 0, 120) : $nm),
+            'image' => $img,
+            'complexity' => trim((string) ($r['complexity'] ?? '')),
+            'prep' => (int) ($r['preparationDuration'] ?? 0),
+            'duration' => (int) ($r['duration'] ?? 0),
+            'rating' => (float) ($r['rating'] ?? 0),
+            'ratings' => (int) ($r['totalRating'] ?? 0),
+            'categories' => array_slice($cats, 0, 3),
+            'url' => trim((string) ($r['url'] ?? '')),
+        ];
+    }
+    out(['ok' => true, 'total' => (int) ($dd['total'] ?? count($out)), 'totalPage' => (int) ($dd['totalPage'] ?? 1),
+        'currentPage' => (int) ($dd['currentPage'] ?? $page), 'recipes' => $out]);
+}
+
+fail('Action inconnue (ping, register, login, join, me, logout, invite_rotate, family_set_gemini, lists_get, lists_create, lists_duplicate, lists_set_archived, lists_delete, items_add, items_add_many, items_toggle, items_update, items_delete, items_clear_checked, mc_recipe, mc_search, mc_session).', 400);

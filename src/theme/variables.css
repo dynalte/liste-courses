@@ -273,6 +273,96 @@ ion-refresher {
 ion-spinner {
   --color: #34d399;
 }
+/* ---------- Barre d'actions fixe (bas de l'onglet Courses) ---------- */
+.action-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  overflow-x: auto;
+  padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+  scrollbar-width: none;
+}
+.action-bar::-webkit-scrollbar {
+  display: none;
+}
+.action-bar ion-button {
+  flex-shrink: 0;
+  margin: 0;
+  --padding-top: 13px;
+  --padding-bottom: 13px;
+  --padding-start: 16px;
+  --padding-end: 16px;
+  font-size: 1rem;
+}
+.action-bar ion-button ion-icon[slot='start'] {
+  font-size: 1.4rem;
+  margin-right: 6px;
+}
+
+/* ---------- Liste Courses compacte (lignes + texte réduits) ---------- */
+.courses-page ion-item {
+  --min-height: 42px;
+  --padding-top: 2px;
+  --padding-bottom: 2px;
+}
+.courses-page ion-item h2 {
+  font-size: 0.88rem;
+  margin: 2px 0;
+}
+.courses-page ion-item p {
+  font-size: 0.72rem;
+  margin: 1px 0 3px;
+}
+.courses-page ion-checkbox {
+  --size: 20px;
+}
+.courses-page .cal-heading {
+  font-size: 0.8rem;
+  margin: 10px 16px 2px;
+}
+.courses-page ion-item-sliding {
+  margin: 2px 8px;
+}
+
+/* ---------- Scan web (PWA) : viseur plein écran ---------- */
+.webscan-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  background: #000;
+}
+.webscan-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.webscan-frame {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: min(78vw, 340px);
+  height: 120px;
+  transform: translate(-50%, -50%);
+  border: 3px solid #34d399;
+  border-radius: 16px;
+  box-shadow: 0 0 0 4000px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+.webscan-hint {
+  position: relative;
+  color: #fff;
+  font-weight: 600;
+  margin: 0;
+}
+
 h3 {
   color: var(--ion-text-color);
 }

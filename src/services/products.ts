@@ -25,6 +25,24 @@ export interface ProductInfo {
 
 export class BarcodeError extends Error {}
 
+/** Scan navigateur (PWA) : caméra + détection JS.
+ * Vrai sur tout navigateur avec getUserMedia (Chrome/Edge via BarcodeDetector,
+ * Safari iOS via ZXing fallback dans WebScanOverlay). */
+export function isWebScanSupported(): boolean {
+  try {
+    return (
+      !Capacitor.isNativePlatform() &&
+      typeof navigator !== 'undefined' &&
+      !!navigator.mediaDevices?.getUserMedia &&
+      typeof window !== 'undefined' &&
+      // Contexte sécurisé requis pour la caméra (HTTPS ou localhost).
+      window.isSecureContext !== false
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Vrai scan caméra native (iOS/Android). Sur web : erreur → utiliser la saisie manuelle. */
 export async function scanBarcode(): Promise<string> {
   if (!Capacitor.isNativePlatform()) {

@@ -329,3 +329,37 @@ export async function analyzeHandwrittenList(jpegBase64: string): Promise<Handwr
     throw new FridgeAiError('Réponse IA inattendue. Relance dans un moment.');
   }
 }
+
+export interface RecognizedProduct {
+  /** Nom court + marque si lisible ("Yaourt nature (Danone)"). Vide si non reconnu. */
+  name: string;
+  brand: string;
+  qty: string;
+}
+
+/**
+ * Reconnaît UN produit photographié (emballage, étiquette, fruit...) pour
+ * l'ajouter à la liste. À distinguer de analyzeHandwrittenList (liste papier).
+ */
+export async function analyzeProductPhoto(jpegBase64: string): Promise<RecognizedProduct> {
+  const img = (jpegBase64 || '').trim();
+  if (!img) throw new FridgeAiError('Aucune image à analyser.');
+  const prompt =
+    `Identifie le produit principal sur cette photo (emballage, étiquette, fruit, légume...). ` +
+    `Nom court en français + marque si lisible sur l'emballage + quantité/poids si lisible ` +
+    `(ex : "500 g", "1 L", sinon chaîne vide). ` +
+    `Si aucun produit n'est identifiable, réponds {"name": "", "brand": "", "qty": ""}.` +
+    `\nRéponds UNIQUEMENT en JSON valide, sans markdown : ` +
+    `{"name": "...", "brand": "...", "qty": "..."}.`;
+  const text = await geminiVisionJson(prompt, [img]);
+  try {
+    const parsed = extractJsonObject<{ name?: unknown; brand?: unknown; qty?: unknown }>(text);
+    const name = String(parsed.name ?? '').trim();
+    const brand = String(parsed.brand ?? '').trim();
+    const qty = String(parsed.qty ?? '').trim();
+    if (!name) return { name: '', brand: '', qty: '' };
+    return { name: brand ? `${name} (${brand})` : name, brand, qty };
+  } catch {
+    throw new FridgeAiError('Réponse IA inattendue. Relance dans un moment.');
+  }
+}

@@ -23,10 +23,10 @@ try {
     const before = pbx;
     pbx = pbx.replace(/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]+;/g, 'IPHONEOS_DEPLOYMENT_TARGET = 16.0;');
     pbx = pbx.replace(/MARKETING_VERSION = [0-9.]+;/g, 'MARKETING_VERSION = 0.2.0;');
-    pbx = pbx.replace(/CURRENT_PROJECT_VERSION = [0-9]+;/g, 'CURRENT_PROJECT_VERSION = 7;');
+    pbx = pbx.replace(/CURRENT_PROJECT_VERSION = [0-9]+;/g, 'CURRENT_PROJECT_VERSION = 27;');
     if (pbx !== before) fs.writeFileSync(PBXPROJ, pbx);
   }
-  console.log('[cap-ios-target] cible iOS mini = 16.0, version 0.2.0 (build 7).');
+  console.log('[cap-ios-target] cible iOS mini = 16.0, version 0.2.0 (build 27).');
 } catch (e) {
   console.error(`[cap-ios-target] échec : ${e.message}`);
   process.exit(1);

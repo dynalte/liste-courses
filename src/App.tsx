@@ -1,17 +1,26 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { IonApp, IonRouterOutlet, IonTabs, IonTabBar, IonTabButton, IonIcon, IonLabel } from '@ionic/react';
-import { IonReactRouter } from '@ionic/react-router';
+// Routage en hash (#/listes) : l'app tourne dans un sous-dossier web
+// (/courses/) sans rewrite serveur, et à l'identique sous Capacitor.
+import { IonReactHashRouter } from '@ionic/react-router';
 import { Redirect, Route } from 'react-router-dom';
-import { cartOutline, cameraOutline, settingsOutline } from 'ionicons/icons';
+import { cartOutline, cameraOutline, restaurantOutline, settingsOutline } from 'ionicons/icons';
 
 import AuthPage from './pages/AuthPage';
 import ListsPage from './pages/ListsPage';
 import FridgePage from './pages/FridgePage';
+import RecipesPage from './pages/RecipesPage';
 import SettingsPage from './pages/SettingsPage';
 import { settings } from './services/settings';
+import { syncFamilyGemini } from './services/serverApi';
 
 const App: React.FC = () => {
   const [authed, setAuthed] = useState(() => settings.sessionToken !== '');
+
+  // Clé Gemini familiale poussée automatiquement à la connexion.
+  useEffect(() => {
+    if (authed) void syncFamilyGemini();
+  }, [authed]);
 
   if (!authed) {
     return (
@@ -23,11 +32,12 @@ const App: React.FC = () => {
 
   return (
     <IonApp>
-      <IonReactRouter>
+      <IonReactHashRouter>
         <IonTabs>
           <IonRouterOutlet>
             <Route exact path="/listes"><ListsPage /></Route>
             <Route exact path="/frigo"><FridgePage /></Route>
+            <Route exact path="/recettes"><RecipesPage /></Route>
             <Route exact path="/reglages"><SettingsPage onLogout={() => setAuthed(false)} /></Route>
             <Route exact path="/"><Redirect to="/listes" /></Route>
           </IonRouterOutlet>
@@ -40,13 +50,17 @@ const App: React.FC = () => {
               <IonIcon icon={cameraOutline} />
               <IonLabel>Frigo IA</IonLabel>
             </IonTabButton>
+            <IonTabButton tab="recettes" href="/recettes">
+              <IonIcon icon={restaurantOutline} />
+              <IonLabel>Recettes</IonLabel>
+            </IonTabButton>
             <IonTabButton tab="reglages" href="/reglages">
               <IonIcon icon={settingsOutline} />
               <IonLabel>Réglages</IonLabel>
             </IonTabButton>
           </IonTabBar>
         </IonTabs>
-      </IonReactRouter>
+      </IonReactHashRouter>
     </IonApp>
   );
 };

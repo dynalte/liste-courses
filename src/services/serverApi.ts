@@ -3,7 +3,7 @@
  * Auth : token de session (header X-Session-Token) obtenu via register/login.
  * Même esprit que download-manager-ionic/src/services/serverApi.ts.
  */
-import { settings } from './settings';
+import { Keys, setSetting, settings } from './settings';
 
 export interface FamilyMember {
   id: number;
@@ -18,6 +18,9 @@ export interface Family {
   name: string;
   inviteCode: string;
   members: FamilyMember[];
+  /** Clé Gemini partagée (poussée aux apps à la connexion). */
+  geminiKey: string;
+  geminiModel: string;
 }
 
 export interface ShoppingItem {
@@ -25,6 +28,8 @@ export interface ShoppingItem {
   listId: number;
   name: string;
   qty: string;
+  /** Rayon supermarché (auto-suggéré, modifiable). */
+  rayon: string;
   checked: boolean;
   addedBy: number;
   addedByName: string;
@@ -36,7 +41,25 @@ export interface ShoppingList {
   id: number;
   familyId: number;
   name: string;
+  /** Modèle réutilisable (jamais clôturé). */
+  isTemplate: boolean;
+  /** Semaine clôturée (lecture seule). */
+  archived: boolean;
+  archivedAt: number;
   items: ShoppingItem[];
+}
+
+/** Événement du fil d'activité familiale (qui a fait quoi). */
+export interface ActivityEvent {
+  id: number;
+  userId: number;
+  actor: string;
+  /** list_create | add | add_many | check | uncheck | edit | delete | clear */
+  action: string;
+  /** nom article, ou nombre pour add_many/clear */
+  item: string;
+  list: string;
+  at: number;
 }
 
 function baseURL(): string {
@@ -88,18 +111,70 @@ export const authApi = {
 export const familyApi = {
   me: () => api<{ user: FamilyMember; family: Family }>('me'),
   rotateInvite: () => api<{ inviteCode: string }>('invite_rotate', {}),
+  /** Clé IA partagée (owner). */
+  setGemini: (key: string, model: string) => api<{ ok: boolean }>('family_set_gemini', { key, model }),
 };
 
+/**
+ * Synchronise la clé Gemini familiale (appelée à la connexion + Réglages).
+ * Le serveur gagne toujours (clé partagée) ; s'il est vide et que l'app
+ * a une clé + rôle owner, on l'y pousse (amorçage initial).
+ * Silencieux hors-ligne (garde la clé locale).
+ */
+export async function syncFamilyGemini(): Promise<boolean> {
+  try {
+    const { user, family } = await familyApi.me();
+    const serverKey = (family.geminiKey || '').trim();
+    const serverModel = (family.geminiModel || '').trim();
+    if (serverKey !== '') {
+      let changed = false;
+      if (serverKey !== settings.geminiApiKey) {
+        setSetting(Keys.geminiApiKey, serverKey);
+        changed = true;
+      }
+      if (serverModel !== '' && serverModel !== settings.geminiModel) {
+        setSetting(Keys.geminiModel, serverModel);
+        changed = true;
+      }
+      return changed;
+    }
+    const localKey = settings.geminiApiKey;
+    if (localKey !== '' && user.role === 'owner') {
+      await familyApi.setGemini(localKey, settings.geminiModel);
+      return false;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export interface NewItem {
+  name: string;
+  qty?: string;
+  rayon?: string;
+}
+
 export const listsApi = {
-  get: () => api<{ lists: ShoppingList[] }>('lists_get'),
+  get: () => api<{ lists: ShoppingList[]; activity: ActivityEvent[]; you: number; youRole: string }>('lists_get'),
   create: (name: string) => api<{ list: ShoppingList }>('lists_create', { name }),
-  addItem: (listId: number, name: string, qty: string) =>
-    api<{ item: ShoppingItem }>('items_add', { listId, name, qty }),
+  /** Nouvelle semaine depuis un modèle/une archive (tous), ou modèle (owner). */
+  duplicate: (listId: number, name?: string, asTemplate?: boolean) =>
+    api<{ list: { id: number; isTemplate: boolean; copied: number } }>('lists_duplicate', { listId, name, asTemplate }),
+  /** Clôturer / rouvrir (tous). */
+  setArchived: (listId: number, archived: boolean) =>
+    api<{ ok: boolean }>('lists_set_archived', { listId, archived }),
+  /** Supprimer définitivement (owner). */
+  deleteList: (listId: number) => api<{ ok: boolean }>('lists_delete', { listId }),
+  addItem: (listId: number, name: string, qty: string, extra?: { rayon?: string }) =>
+    api<{ item: ShoppingItem }>('items_add', { listId, name, qty, ...extra }),
   toggleItem: (itemId: number, checked: boolean) =>
     api<{ ok: boolean }>('items_toggle', { itemId, checked }),
+  updateItem: (itemId: number, patch: { name?: string; qty?: string; rayon?: string }) =>
+    api<{ ok: boolean }>('items_update', { itemId, ...patch }),
   deleteItem: (itemId: number) => api<{ ok: boolean }>('items_delete', { itemId }),
   /** Ajout en masse (ex : depuis l'analyse frigo IA). Retourne le nb ajouté. */
-  addMany: (listId: number, names: Array<string | { name: string; qty?: string }>) =>
+  addMany: (listId: number, names: Array<string | NewItem>) =>
     api<{ added: number }>('items_add_many', { listId, names }),
   clearChecked: (listId: number) => api<{ deleted: number }>('items_clear_checked', { listId }),
 };

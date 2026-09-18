@@ -20,21 +20,25 @@ const TRANSPARENT_CLASS = 'camera-preview-active';
 function setTransparent(on: boolean) {
   try {
     document.documentElement.classList.toggle(TRANSPARENT_CLASS, on);
+    // Masquage direct (ne dépend pas du CSS) : la prévisualisation est
+    // plein écran, seule la barre de capture reste visible.
+    document.querySelectorAll('ion-tab-bar, ion-header, ion-footer').forEach((el) => {
+      (el as HTMLElement).style.display = on ? 'none' : '';
+    });
   } catch {
     /* ignore */
   }
 }
 
-/** Ouvre la prévisualisation (caméra arrière) et démarre l'enregistrement. */
+/** Ouvre la prévisualisation plein écran (caméra arrière) et démarre l'enregistrement. */
 export async function startFilming(): Promise<void> {
   if (!Capacitor.isNativePlatform()) {
     throw new VideoCaptureError('Filming natif indisponible sur web.');
   }
   // Preview native PAR-DESSUS la WebView (toBack: false) : aucun besoin de
-  // transparence. On réserve une bande de contrôles en bas pour nos boutons.
-  const CONTROL_STRIP = 260;
+  // transparence. Plein écran, seule la barre de capture reste visible.
   const width = Math.round(window.innerWidth || window.screen.width);
-  const height = Math.max(320, Math.round((window.innerHeight || window.screen.height) - CONTROL_STRIP));
+  const height = Math.round(window.innerHeight || window.screen.height);
   try {
     await CameraPreview.start({
       position: 'rear',

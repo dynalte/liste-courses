@@ -7,7 +7,10 @@ import {
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
 import { analyzeFridgePhoto, downscaleToBase64, extractVideoFrames, type FridgeAnalysis } from '../services/fridgeAi';
+import { suggestRayon } from '../services/rayons';
 import { cancelFilming, startFilming, stopFilming } from '../services/videoCapture';
+import { closePhotoPreview, openPhotoPreview, snapPhoto } from '../services/photoCapture';
+import CaptureOverlay from '../components/CaptureOverlay';
 import { listsApi, type ShoppingList } from '../services/serverApi';
 
 const VIDEO_FRAMES = 8;
@@ -20,6 +23,7 @@ const FridgePage: React.FC = () => {
   const [filmSeconds, setFilmSeconds] = useState(0);
   const filmTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const videoInput = useRef<HTMLInputElement>(null);
+  const [capturing, setCapturing] = useState(false);
   const [hint, setHint] = useState('');
   const [result, setResult] = useState<FridgeAnalysis | null>(null);
   const [error, setError] = useState('');
@@ -30,8 +34,11 @@ const FridgePage: React.FC = () => {
 
   useEffect(() => {
     listsApi.get().then((r) => {
-      setLists(r.lists);
-      if (r.lists.length > 0) setTargetListId(r.lists[0].id);
+      // Cibles = listes en cours (ni modèles ni archives).
+      const open = r.lists.filter((l) => !l.archived && !l.isTemplate);
+      setLists(open.length > 0 ? open : r.lists);
+      const first = open.length > 0 ? open[0] : r.lists[0];
+      if (first) setTargetListId(first.id);
     }).catch(() => {});
   }, []);
 
@@ -51,6 +58,42 @@ const FridgePage: React.FC = () => {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
+  }
+
+  /** Photo frigo SANS l'écran "Use Photo" : capture intégrée (natif), système sinon. */
+  async function handleFridgePhoto() {
+    setError(''); setAddedMsg(''); setResult(null);
+    if (!Capacitor.isNativePlatform()) {
+      await takePhoto(CameraSource.Camera);
+      return;
+    }
+    try {
+      await openPhotoPreview();
+      setCapturing(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function handleSnap() {
+    setBusy(true);
+    try {
+      const b64 = await snapPhoto();
+      await closePhotoPreview();
+      setCapturing(false);
+      const small = await downscaleToBase64(b64);
+      setImages([small]);
+      setIsVideo(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCancelCapture() {
+    await closePhotoPreview();
+    setCapturing(false);
   }
 
   /** Vidéo (travelling dans le frigo) → N images-clés extraites côté app. */
@@ -152,7 +195,10 @@ const FridgePage: React.FC = () => {
     if (!result || targetListId === null || result.toBuy.length === 0) return;
     setBusy(true);
     try {
-      const r = await listsApi.addMany(targetListId, result.toBuy);
+      const r = await listsApi.addMany(
+        targetListId,
+        result.toBuy.map((n) => ({ name: n, rayon: suggestRayon(n) })),
+      );
       setAddedMsg(`${r.added} article(s) ajouté(s) à la liste.`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -164,8 +210,8 @@ const FridgePage: React.FC = () => {
       <IonHeader><IonToolbar><IonTitle>Frigo → IA</IonTitle></IonToolbar></IonHeader>
       <IonContent className="ion-padding">
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <IonButton onClick={() => takePhoto(CameraSource.Camera)}>📷 Photo frigo</IonButton>
-          <IonButton fill="outline" onClick={() => void handleFilm()} disabled={busy || filming}>🎥 Filmer</IonButton>
+          <IonButton onClick={() => void handleFridgePhoto()}>📷 Photo frigo</IonButton>
+          <IonButton fill="outline" onClick={() => videoInput.current?.click()} disabled={busy}>🎥 Filmer</IonButton>
           <IonButton fill="outline" onClick={() => takePhoto(CameraSource.Photos)}>🖼 Galerie</IonButton>
           <input
             ref={videoInput}
@@ -176,16 +222,6 @@ const FridgePage: React.FC = () => {
             onChange={(e) => void handleVideoFile(e.target.files?.[0])}
           />
         </div>
-        {filming && (
-          <div className="film-overlay">
-            <div className="film-rec">⏺ REC {String(Math.floor(filmSeconds / 60)).padStart(1, '0')}:{String(filmSeconds % 60).padStart(2, '0')}</div>
-            <p>Balaie lentement le frigo de haut en bas.</p>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <IonButton color="danger" onClick={() => void handleStopFilm()}>■ Stop</IonButton>
-              <IonButton fill="outline" onClick={() => void handleCancelFilm()}>Annuler</IonButton>
-            </div>
-          </div>
-        )}
         {images.length > 0 && (
           <>
             {isVideo ? (
@@ -249,6 +285,20 @@ const FridgePage: React.FC = () => {
         )}
         <p className="status-bar">Photo ou vidéo sans son : tout est envoyé à Gemini avec ta clé (Réglages). Rien n’est stocké sur le serveur PHP. Astuce : filme lentement de haut en bas pour couvrir toutes les étagères.</p>
       </IonContent>
+      {/* Overlays hors du contenu scrollable : calés à l'écran, au-dessus du menu. */}
+      {capturing && (
+        <CaptureOverlay busy={busy} hint="Cadre le frigo puis capture." onSnap={() => void handleSnap()} onCancel={() => void handleCancelCapture()} />
+      )}
+      {filming && (
+        <div className="film-overlay">
+          <div className="film-rec">⏺ REC {String(Math.floor(filmSeconds / 60)).padStart(1, '0')}:{String(filmSeconds % 60).padStart(2, '0')}</div>
+          <p>Balaie lentement le frigo de haut en bas.</p>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <IonButton color="danger" onClick={() => void handleStopFilm()}>■ Stop</IonButton>
+            <IonButton fill="outline" onClick={() => void handleCancelFilm()}>Annuler</IonButton>
+          </div>
+        </div>
+      )}
     </IonPage>
   );
 };
