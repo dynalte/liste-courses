@@ -47,9 +47,10 @@
       POST ?action=mc_recipe {recipeId|url, cookie, lang?} → recette Monsieur
         Cuisine (via proxy-api, cookie Lidl Plus fourni à chaque appel, jamais
         stocké) : {id, title, servings, groups:[{name, items:[{name,qty,optional}]}]}
-      POST ?action=mc_search {q?, page?, lang?} → catalogue public MC :
-        {total, totalPage, currentPage, recipes:[{id,name,image,complexity,
-        prep,duration,rating,ratings,categories,url}]} (vide q = nouveautés)
+      POST ?action=mc_search {q?, page?, lang?, sort?, categories?} → catalogue
+        public MC : {total, totalPage, currentPage, recipes:[...]}
+        (q vide = nouveautés ; sort = new|popular|top ; categories = IDs MC)
+      POST ?action=mc_categories {lang?} → catégories MC : [{id, name}]
       POST ?action=mc_session {cookie, lang?} → valide la session MC :
         {user} (distingue cookie invalide / recette introuvable)
       POST ?action=logout
@@ -967,6 +968,103 @@ function mc_guess_names(string $apiKey, string $model, string $title, array $kno
     return $out;
 }
 
+/**
+ * Ligne de cuisson MC lisible depuis deviceSetting :
+ * "🔥 Rissoler · 130 °C · 4 min · Vitesse 1 · ↩ sens inverse".
+ * time en secondes, weight en g. '' si rien d'exploitable.
+ */
+function mc_cook_line($ds): string
+{
+    if (!is_array($ds)) return '';
+    $norm = strtolower(str_replace(['-', '_', ' '], '', trim((string) ($ds['mode'] ?? ''))));
+    $labels = [
+        'scale' => '⚖️ Pesée', 'customized' => '⚙️ Manuel',
+        'roast' => '🔥 Rissoler', 'slowcook' => '🍲 Mijoter', 'slowcooking' => '🍲 Mijoter',
+        'steam' => '♨️ Vapeur', 'knead' => '🍞 Pétrir', 'doughkneading' => '🍞 Pétrir',
+        'sousvide' => '🌡️ Sous-vide', 'turbo' => '🌀 Turbo',
+        'precleaning' => '🧽 Prélavage', 'preclean' => '🧽 Prélavage',
+        'fermentation' => '🌱 Fermentation', 'ferment' => '🌱 Fermentation',
+        'ricecooking' => '🍚 Riz', 'ricecook' => '🍚 Riz', 'rice' => '🍚 Riz',
+        'foodprocessor' => '🔪 Robot', 'puree' => '🥣 Mixer', 'smoothie' => '🥤 Smoothie',
+        'boil' => '💧 Bouillir', 'fry' => '🍳 Frire',
+    ];
+    $label = $labels[$norm] ?? ($norm !== '' ? ucfirst(trim((string) ($ds['mode'] ?? ''))) : '');
+    $s = [];
+    if (isset($ds['settings']) && is_array($ds['settings']) && isset($ds['settings'][0]) && is_array($ds['settings'][0])) {
+        $s = $ds['settings'][0];
+    }
+    $parts = [];
+    // "Manuel" seul n'apporte rien : on l'affiche seulement avec des réglages.
+    if ($label !== '' && ($norm !== 'customized' || !empty($s))) $parts[] = $label;
+    $isScale = ($norm === 'scale');
+    // Température : affichée même à 0 (comme le site officiel), sauf pesée.
+    $temp = $s['temperature'] ?? null;
+    if (!$isScale && is_numeric($temp)) {
+        $parts[] = ((float) $temp == (int) $temp ? (int) $temp : (float) $temp) . ' °C';
+    }
+    $time = $s['time'] ?? null;
+    if (is_numeric($time) && (int) $time > 0) {
+        $t = (int) $time;
+        if ($t < 60) $parts[] = $t . ' s';
+        elseif ($t % 60 === 0) $parts[] = (int) ($t / 60) . ' min';
+        else $parts[] = (int) floor($t / 60) . ' min ' . ($t % 60) . ' s';
+    }
+    $speed = $s['speed'] ?? null;
+    if (!$isScale && is_numeric($speed)) $parts[] = 'Vitesse ' . (int) $speed;
+    $weight = $s['weight'] ?? null;
+    if (is_numeric($weight) && (float) $weight > 0) {
+        $parts[] = ((float) $weight == (int) $weight ? (int) $weight : (float) $weight) . ' g';
+    }
+    // Sens de rotation toujours précisé (comme le site), sauf pesée.
+    if (!$isScale && array_key_exists('reverse', $ds)) {
+        $parts[] = !empty($ds['reverse']) ? 'Rotation à gauche' : 'Rotation à droite';
+    }
+    if (!empty($ds['turbo']) && $norm !== 'turbo') $parts[] = 'Turbo';
+    return implode(' · ', $parts);
+}
+
+/**
+ * Étapes de préparation (v3 auth et v2 public partagent la forme
+ * {titre, description} sous des clés différentes).
+ */
+function mc_parse_steps(array $serving): array
+{
+    $steps = [];
+    $list = (isset($serving['steps']) && is_array($serving['steps'])) ? array_slice($serving['steps'], 0, 40) : [];
+    $n = 0;
+    foreach ($list as $st) {
+        if (!is_array($st)) continue;
+        $n++;
+        $name = trim((string) ($st['name'] ?? $st['title'] ?? ''));
+        $text = trim((string) ($st['description'] ?? $st['text'] ?? ''));
+        if (mb_strlen($name) > 120) $name = mb_substr($name, 0, 120);
+        if (mb_strlen($text) > 800) $text = mb_substr($text, 0, 800);
+        $cook = mc_cook_line($st['deviceSetting'] ?? $st['mode'] ?? null);
+        if ($name === '' && $text === '' && $cook === '') continue;
+        $ord = $st['order'] ?? $st['step'] ?? $n;
+        $steps[] = ['order' => is_numeric($ord) ? (int) $ord : $n, 'name' => $name, 'text' => $text, 'cook' => $cook];
+    }
+    return $steps;
+}
+
+/**
+ * Photo principale d'une recette (détail HD puis vignette).
+ */
+function mc_pick_image(array $recipe): string
+{
+    foreach (['detailsImage', 'thumbnail', 'image'] as $k) {
+        if (!isset($recipe[$k]) || !is_array($recipe[$k])) continue;
+        foreach (['landscape', 'portrait', 'url'] as $f) {
+            $u = trim((string) ($recipe[$k][$f] ?? ''));
+            if ($u !== '') return $u;
+        }
+    }
+    if (isset($recipe['media']) && is_string($recipe['media']) && trim($recipe['media']) !== '') {
+        return trim($recipe['media']);
+    }
+    return '';
+}
+
 if ($action === 'mc_recipe') {
     // Prototype recettes Monsieur Cuisine → ingrédients.
     // Chaîne (cf. smart-recipe/src/mc/client.ts, MIT) :
@@ -1004,6 +1102,8 @@ if ($action === 'mc_recipe') {
     $title = '';
     $servings = '';
     $groups = null;
+    $steps = [];
+    $image = '';
     $authInfo = 'non tentée (pas de cookie)';
     $pubInfo = 'non tentée';
 
@@ -1020,6 +1120,7 @@ if ($action === 'mc_recipe') {
             if (!is_array($recipe) && isset($data['data']) && is_array($data['data'])) $recipe = $data['data'];
             if (is_array($recipe)) {
                 $title = trim((string) ($recipe['title'] ?? $recipe['name'] ?? ''));
+                $image = mc_pick_image($recipe);
                 $serving = [];
                 if (isset($recipe['servingSizes']) && is_array($recipe['servingSizes']) && isset($recipe['servingSizes'][0]) && is_array($recipe['servingSizes'][0])) {
                     $serving = $recipe['servingSizes'][0];
@@ -1029,6 +1130,7 @@ if ($action === 'mc_recipe') {
                 if (is_numeric($serving['amount'] ?? null)) {
                     $servings = trim((string) $serving['amount'] . ' ' . trim((string) ($serving['unit'] ?? 'parts')));
                 }
+                $steps = mc_parse_steps($serving);
                 $tmp = [];
                 $ig = (isset($serving['ingredientGroups']) && is_array($serving['ingredientGroups'])) ? $serving['ingredientGroups'] : [];
                 foreach ($ig as $g) {
@@ -1075,10 +1177,12 @@ if ($action === 'mc_recipe') {
         $recipe = (isset($data['data']['recipe']) && is_array($data['data']['recipe'])) ? $data['data']['recipe'] : null;
         if ($httpCode >= 200 && $httpCode < 300 && is_array($recipe)) {
             $title = trim((string) ($recipe['name'] ?? $recipe['title'] ?? ''));
+            $image = mc_pick_image($recipe);
             $serving = (isset($recipe['servingSizes'][0]) && is_array($recipe['servingSizes'][0])) ? $recipe['servingSizes'][0] : [];
             if (is_numeric($serving['amount'] ?? null)) {
                 $servings = trim((string) $serving['amount'] . ' ' . trim((string) ($serving['servingUnit'] ?? $serving['unit'] ?? 'parts')));
             }
+            $steps = mc_parse_steps($serving);
             $gNames = [];
             $ig = (isset($serving['ingredientGroups']) && is_array($serving['ingredientGroups'])) ? $serving['ingredientGroups'] : [];
             foreach ($ig as $g) {
@@ -1086,8 +1190,7 @@ if ($action === 'mc_recipe') {
             }
             $byGroup = [];
             $order = [];
-            $ing = (isset($serving['ingredients']) && is_array($serving['ingredients'])) ? $serving['ingredients'] : [];
-            $sysNames = null;
+            $ing = (isset($serving['ingredients']) && is_array($serving['ingredients'])) ? $serving['ingredients'] : [];            $sysNames = null;
             $unknown = [];
             $uIdx = 0;
             foreach ($ing as $in) {
@@ -1156,7 +1259,55 @@ if ($action === 'mc_recipe') {
         fail('Recette ' . $id . ' introuvable (privé : ' . $authInfo . ' ; public : ' . $pubInfo . ').', 404);
     }
     if ($title === '') $title = 'Recette MC ' . $id;
-    out(['ok' => true, 'recipe' => ['id' => $id, 'title' => $title, 'servings' => $servings, 'groups' => $groups]]);
+    out(['ok' => true, 'recipe' => ['id' => $id, 'title' => $title, 'servings' => $servings, 'groups' => $groups, 'steps' => $steps, 'image' => $image]]);
+}
+
+if ($action === 'mc_categories') {
+    // Catégories du catalogue MC : GET mc-api/api/v1/categories (cache 7 j).
+    $u = require_user($db);
+    $b = body();
+    $lang = trim((string) ($b['lang'] ?? 'fr-FR'));
+    if (!preg_match('/^[a-z]{2}-[A-Z]{2}$/', $lang)) $lang = 'fr-FR';
+    $safe = preg_replace('/[^a-zA-Z-]/', '', $lang);
+    $file = __DIR__ . '/data/mc-categories-' . $safe . '.json';
+    if (is_file($file) && (time() - (int) @filemtime($file)) < 7 * 24 * 3600) {
+        $j = json_decode((string) @file_get_contents($file), true);
+        if (is_array($j) && count($j) > 0) out(['ok' => true, 'categories' => $j]);
+    }
+    [$httpCode, $data] = mc_http_get('https://mc-api.tecpal.com/api/v1/categories', $lang);
+    if ($data === null) fail('Catalogue MC injoignable.', 502);
+    if ($httpCode < 200 || $httpCode >= 300) fail('Catalogue MC : HTTP ' . $httpCode . '.', 502);
+    $list = (isset($data['data']['categories']) && is_array($data['data']['categories'])) ? $data['data']['categories'] : [];
+    // Ordre "repas" figé : entrées → plats → dessert → reste, cuisines,
+    // accessoires en fin. Inconnues futures : avant les accessoires.
+    $rank = [
+        '339' => 1, '259' => 2, '243' => 3, '283' => 4, '227' => 5,
+        '235' => 6, '251' => 7, '219' => 8, '307' => 9, '315' => 10,
+        '323' => 11, '331' => 12, '275' => 13, '347' => 14, '267' => 15,
+        '583' => 16, '574' => 17, '467' => 18, '468' => 19, '495' => 20,
+        '466' => 21, '469' => 22,
+    ];
+    $tail = ['555' => true, '564' => true, '497' => true];
+    $out = [];
+    foreach ($list as $c) {
+        if (!is_array($c)) continue;
+        $nm = trim((string) ($c['name'] ?? ''));
+        if (!isset($c['id']) || $nm === '') continue;
+        $id = (string) $c['id'];
+        $out[] = [
+            'id' => $id,
+            'name' => (mb_strlen($nm) > 40 ? mb_substr($nm, 0, 40) : $nm),
+            '_rank' => isset($tail[$id]) ? 1000 : ($rank[$id] ?? 900),
+        ];
+    }
+    if (count($out) === 0) fail('Aucune catégorie.', 502);
+    usort($out, function ($a, $b) {
+        if ($a['_rank'] !== $b['_rank']) return $a['_rank'] - $b['_rank'];
+        return strcmp($a['name'], $b['name']);
+    });
+    $out = array_map(function ($c) { return ['id' => $c['id'], 'name' => $c['name']]; }, $out);
+    @file_put_contents($file, json_encode($out, JSON_UNESCAPED_UNICODE));
+    out(['ok' => true, 'categories' => $out]);
 }
 
 if ($action === 'mc_search') {
@@ -1169,52 +1320,29 @@ if ($action === 'mc_search') {
     $q = trim((string) ($b['q'] ?? ''));
     $page = (int) ($b['page'] ?? 1);
     $lang = trim((string) ($b['lang'] ?? 'fr-FR'));
+    $sort = trim((string) ($b['sort'] ?? 'new'));
     if ($page < 1) $page = 1;
     if ($page > 200) $page = 200;
     if (mb_strlen($q) > 80) $q = mb_substr($q, 0, 80);
     if (!preg_match('/^[a-z]{2}-[A-Z]{2}$/', $lang)) $lang = 'fr-FR';
-    $params = [
-        'sortBy[0][field]' => 'lastUpdated',
-        'sortBy[0][direction]' => 'DESC',
-    ];
-    if ($q !== '') $params['q'] = $q;
-    $target = 'https://mc-api.tecpal.com/api/v1/recipes/search/page/' . $page . '?' . http_build_query($params);
-    $headers = [
-        'User-Agent: Mozilla/5.0',
-        'Accept-Language: ' . $lang,
-        'device-type: MC3.0',
-    ];
-    $raw = null;
-    if (function_exists('curl_init')) {
-        $ch = curl_init($target);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPGET => true,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_TIMEOUT => 15,
-            CURLOPT_CONNECTTIMEOUT => 8,
-        ]);
-        $raw = curl_exec($ch);
-        $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlErr = (string) curl_error($ch);
-        curl_close($ch);
-        if (!is_string($raw) || $raw === '') fail('Catalogue MC injoignable (' . $curlErr . ').', 502);
-    } else {
-        $ctx = stream_context_create(['http' => [
-            'method' => 'GET',
-            'header' => implode("\r\n", $headers),
-            'timeout' => 15,
-            'ignore_errors' => true,
-        ]]);
-        $raw = @file_get_contents($target, false, $ctx);
-        if (!is_string($raw) || $raw === '') fail('Catalogue MC injoignable.', 502);
-        $httpCode = 0;
-        if (isset($http_response_header[0]) && preg_match('/\s(\d{3})\s/', (string) $http_response_header[0], $m)) {
-            $httpCode = (int) $m[1];
+    // Tri : new (nouveautés) | popular (populaires) | top (mieux notés).
+    $sortMap = ['new' => 'lastUpdated', 'popular' => 'popularity', 'top' => 'rating'];
+    $sortField = $sortMap[$sort] ?? 'lastUpdated';
+    // Catégories : IDs numériques MC (cf. mc_categories), max 10.
+    $cats = [];
+    $rawCats = $b['categories'] ?? [];
+    if (is_string($rawCats)) $rawCats = explode(',', $rawCats);
+    if (is_array($rawCats)) {
+        foreach (array_slice($rawCats, 0, 10) as $c) {
+            $c = trim((string) (is_array($c) ? ($c['id'] ?? '') : $c));
+            if (preg_match('/^\d{1,6}$/', $c)) $cats[] = $c;
         }
     }
-    $data = json_decode((string) $raw, true);
-    if (!is_array($data)) fail('Catalogue MC illisible.', 502);
+    $qs = 'sortBy%5B0%5D%5Bfield%5D=' . $sortField . '&sortBy%5B0%5D%5Bdirection%5D=DESC';
+    if ($q !== '') $qs .= '&q=' . rawurlencode($q);
+    foreach ($cats as $c) $qs .= '&filters%5Bcategory%5D%5B%5D=' . $c;
+    [$httpCode, $data] = mc_http_get('https://mc-api.tecpal.com/api/v1/recipes/search/page/' . $page . '?' . $qs, $lang);
+    if ($data === null) fail('Catalogue MC injoignable.', 502);
     if ($httpCode < 200 || $httpCode >= 300) fail('Catalogue MC : HTTP ' . $httpCode . '.', 502);
     if (($data['code'] ?? null) !== 0 || !isset($data['data']) || !is_array($data['data'])) {
         fail('Catalogue MC : ' . mb_substr((string) ($data['message'] ?? 'erreur inconnue'), 0, 160), 502);
@@ -1252,4 +1380,4 @@ if ($action === 'mc_search') {
         'currentPage' => (int) ($dd['currentPage'] ?? $page), 'recipes' => $out]);
 }
 
-fail('Action inconnue (ping, register, login, join, me, logout, invite_rotate, family_set_gemini, lists_get, lists_create, lists_duplicate, lists_set_archived, lists_delete, items_add, items_add_many, items_toggle, items_update, items_delete, items_clear_checked, mc_recipe, mc_search, mc_session).', 400);
+fail('Action inconnue (ping, register, login, join, me, logout, invite_rotate, family_set_gemini, lists_get, lists_create, lists_duplicate, lists_set_archived, lists_delete, items_add, items_add_many, items_toggle, items_update, items_delete, items_clear_checked, mc_recipe, mc_search, mc_session, mc_categories).', 400);

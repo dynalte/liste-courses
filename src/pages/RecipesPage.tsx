@@ -3,9 +3,10 @@ import {
   IonPage, IonHeader, IonToolbar, IonTitle, IonContent, IonList, IonItem,
   IonLabel, IonCheckbox, IonInput, IonButton, IonText, IonChip, IonToast,
   IonThumbnail, IonSearchbar, IonModal, IonButtons, IonFooter,
+  IonSegment, IonSegmentButton,
 } from '@ionic/react';
 import { listsApi, type ShoppingList } from '../services/serverApi';
-import { fetchMcRecipe, openMcLogin, searchMcRecipes, type McRecipe, type McSearchResult } from '../services/mcRecipes';
+import { fetchMcRecipe, openMcLogin, searchMcRecipes, fetchMcCategories, type McRecipe, type McSearchResult, type McCategory, type McSort } from '../services/mcRecipes';
 import { settings } from '../services/settings';
 import { suggestRayon } from '../services/rayons';
 
@@ -27,12 +28,18 @@ const RecipesPage: React.FC = () => {
   const [page, setPage] = useState(1);
   const [totalPage, setTotalPage] = useState(1);
   const [searching, setSearching] = useState(false);
+  /** Tri suggestions (comme le site) + filtres catégories. */
+  const [sort, setSort] = useState<McSort>('new');
+  const [categories, setCategories] = useState<McCategory[]>([]);
+  const [selCats, setSelCats] = useState<string[]>([]);
   const [lists, setLists] = useState<ShoppingList[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
   const [err, setErr] = useState('');
   const [toastMsg, setToastMsg] = useState('');
+  /** Onglet de la popin recette : ingrédients (ajout liste) ou pas-à-pas. */
+  const [detailTab, setDetailTab] = useState<'items' | 'steps'>('items');
 
   const hasCookie = settings.mcCookie !== '';
   const actives = lists.filter((l) => !l.archived && !l.isTemplate);
@@ -46,8 +53,9 @@ const RecipesPage: React.FC = () => {
         if (first) setActiveId(first.id);
       })
       .catch(() => {});
-    // Catalogue : nouveautés par défaut.
-    void runSearch('', 1, true);
+    // Catalogue : nouveautés par défaut + liste des catégories.
+    void runSearch('', 1, true, 'new', []);
+    fetchMcCategories().then(setCategories).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -55,11 +63,11 @@ const RecipesPage: React.FC = () => {
     return `${g}:${i}`;
   }
 
-  /** Recherche catalogue (q vide = nouveautés). */
-  async function runSearch(q: string, p: number, replace: boolean) {
+  /** Recherche catalogue (q vide = suggestion selon le tri). */
+  async function runSearch(q: string, p: number, replace: boolean, s: McSort = sort, cats: string[] = selCats) {
     setSearching(true);
     try {
-      const r = await searchMcRecipes(q, p);
+      const r = await searchMcRecipes(q, p, s, cats);
       setResults((prev) => (replace ? r.recipes : [...prev, ...r.recipes]));
       setTotal(r.total);
       setPage(r.currentPage);
@@ -71,8 +79,19 @@ const RecipesPage: React.FC = () => {
     }
   }
 
+  function changeSort(s: McSort) {
+    setSort(s);
+    void runSearch(searchQ, 1, true, s, selCats);
+  }
+
+  function toggleCat(id: string) {
+    const next = selCats.includes(id) ? selCats.filter((c) => c !== id) : [...selCats, id];
+    setSelCats(next);
+    void runSearch(searchQ, 1, true, sort, next);
+  }
+
   async function loadRecipe(input: string) {
-    setErr(''); setRecipe(null);
+    setErr(''); setRecipe(null); setDetailTab('items');
     if (!input.trim()) { setErr('Colle l’URL d’une recette monsieur-cuisine.com (ou son ID).'); return; }
     setLoading(true);
     try {
@@ -141,9 +160,35 @@ const RecipesPage: React.FC = () => {
           placeholder="Rechercher une recette (ex : risotto)"
           value={searchQ}
           onIonInput={(e) => setSearchQ(e.detail.value ?? '')}
-          onIonChange={(e) => { void runSearch(e.detail.value ?? '', 1, true); }}
+          onIonChange={(e) => { void runSearch(e.detail.value ?? '', 1, true, sort, selCats); }}
           debounce={600}
         />
+        <IonSegment
+          value={sort}
+          onIonChange={(e) => {
+            const s = e.detail.value as McSort;
+            if (s === 'new' || s === 'popular' || s === 'top') changeSort(s);
+          }}
+        >
+          <IonSegmentButton value="new"><IonLabel>Nouveautés</IonLabel></IonSegmentButton>
+          <IonSegmentButton value="popular"><IonLabel>Populaires</IonLabel></IonSegmentButton>
+          <IonSegmentButton value="top"><IonLabel>Mieux notées</IonLabel></IonSegmentButton>
+        </IonSegment>
+        {categories.length > 0 && (
+          <div style={{ display: 'flex', gap: 6, overflowX: 'auto', padding: '8px 2px' }}>
+            {categories.map((c) => (
+              <IonChip
+                key={c.id}
+                color={selCats.includes(c.id) ? 'primary' : undefined}
+                outline={!selCats.includes(c.id)}
+                onClick={() => toggleCat(c.id)}
+                style={{ flexShrink: 0 }}
+              >
+                {c.name}
+              </IonChip>
+            ))}
+          </div>
+        )}
         {results.length > 0 && (
           <>
             <p className="cal-heading">📖 {total} recette(s)</p>
@@ -163,7 +208,7 @@ const RecipesPage: React.FC = () => {
               ))}
             </IonList>
             {page < totalPage && (
-              <IonButton expand="block" fill="outline" onClick={() => void runSearch(searchQ, page + 1, false)} disabled={searching}>
+              <IonButton expand="block" fill="outline" onClick={() => void runSearch(searchQ, page + 1, false, sort, selCats)} disabled={searching}>
                 {searching ? '…' : `Plus de résultats (${page}/${totalPage})`}
               </IonButton>
             )}
@@ -181,7 +226,11 @@ const RecipesPage: React.FC = () => {
         {err && !recipe && <IonText color="danger"><p>{err}</p></IonText>}
 
         {/* Détail recette en popin par-dessus la recherche. */}
-        <IonModal isOpen={recipe !== null} onDidDismiss={() => { setRecipe(null); setErr(''); }}>
+        <IonModal
+          className="recipe-modal"
+          isOpen={recipe !== null}
+          onDidDismiss={() => { setRecipe(null); setErr(''); }}
+        >
           <IonHeader>
             <IonToolbar>
               <IonTitle>{recipe?.title ?? 'Recette'}</IonTitle>
@@ -193,8 +242,25 @@ const RecipesPage: React.FC = () => {
           <IonContent className="ion-padding">
             {recipe && (
               <>
+                {recipe.image ? (
+                  <img
+                    src={recipe.image}
+                    alt={recipe.title}
+                    loading="lazy"
+                    style={{ width: '100%', borderRadius: 12, marginBottom: 8, display: 'block' }}
+                  />
+                ) : null}
                 {recipe.servings ? <IonText color="medium"><p style={{ marginTop: 0 }}>{recipe.servings} • {recipe.groups.flatMap((g) => g.items).length} ingrédient(s)</p></IonText> : null}
                 {err && <IonText color="danger"><p>{err}</p></IonText>}
+                <IonSegment
+                  value={detailTab}
+                  onIonChange={(e) => setDetailTab(e.detail.value === 'steps' ? 'steps' : 'items')}
+                >
+                  <IonSegmentButton value="items"><IonLabel>Ingrédients</IonLabel></IonSegmentButton>
+                  <IonSegmentButton value="steps"><IonLabel>Recette</IonLabel></IonSegmentButton>
+                </IonSegment>
+                {detailTab === 'items' ? (
+                <>
                 <div style={{ display: 'flex', gap: 8, margin: '8px 0' }}>
                   <IonButton size="small" fill="outline" onClick={() => toggleAll(true)}>Tout</IonButton>
                   <IonButton size="small" fill="outline" onClick={() => toggleAll(false)}>Rien</IonButton>
@@ -239,9 +305,29 @@ const RecipesPage: React.FC = () => {
                     ))}
                   </div>
                 )}
+                </>
+                ) : (
+                <>
+                {recipe.steps.length === 0 && (
+                  <IonText color="medium"><p>Pas-à-pas non disponible pour cette recette.</p></IonText>
+                )}
+                <IonList>
+                  {recipe.steps.map((st, i) => (
+                    <IonItem key={i}>
+                      <IonLabel>
+                        <h2>{i + 1}. {st.name || `Étape ${i + 1}`}</h2>
+                        {st.text ? <p style={{ whiteSpace: 'pre-wrap' }}>{st.text}</p> : null}
+                        {st.cook ? <p><IonChip color="tertiary" style={{ margin: '4px 0 0' }}>{st.cook}</IonChip></p> : null}
+                      </IonLabel>
+                    </IonItem>
+                  ))}
+                </IonList>
+                </>
+                )}
               </>
             )}
           </IonContent>
+          {detailTab === 'items' && (
           <IonFooter>
             <IonToolbar>
               <IonButton expand="block" onClick={addToList} disabled={adding || !active || !recipe}>
@@ -249,6 +335,7 @@ const RecipesPage: React.FC = () => {
               </IonButton>
             </IonToolbar>
           </IonFooter>
+          )}
         </IonModal>
         <IonToast
           isOpen={toastMsg !== ''}

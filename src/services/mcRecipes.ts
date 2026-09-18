@@ -20,11 +20,21 @@ export interface McIngredientGroup {
   items: McIngredient[];
 }
 
+export interface McRecipeStep {
+  order: number;
+  name: string;
+  text: string;
+  /** Ligne de cuisson MC : "🔥 Rissoler · 130 °C · 4 min · Vitesse 1". */
+  cook: string;
+}
+
 export interface McRecipe {
   id: string;
   title: string;
   servings: string;
   groups: McIngredientGroup[];
+  steps: McRecipeStep[];
+  image: string;
 }
 
 export interface McSearchResult {
@@ -47,9 +57,23 @@ export interface McSearchPage {
   recipes: McSearchResult[];
 }
 
+export type McSort = 'new' | 'popular' | 'top';
+
+export interface McCategory {
+  id: string;
+  name: string;
+}
+
+/** Catégories du catalogue MC (cache serveur 7 j). */
+export async function fetchMcCategories(): Promise<McCategory[]> {
+  const r = await api<{ categories: McCategory[] }>('mc_categories', { lang: 'fr-FR' });
+  if (!r || !Array.isArray(r.categories)) throw new Error('Catégories illisibles.');
+  return r.categories;
+}
+
 /** Catalogue public MC : recherche (q vide = nouveautés). Sans cookie. */
-export async function searchMcRecipes(q: string, page = 1): Promise<McSearchPage> {
-  const r = await api<McSearchPage>('mc_search', { q: q.trim(), page, lang: 'fr-FR' });
+export async function searchMcRecipes(q: string, page = 1, sort: McSort = 'new', categories: string[] = []): Promise<McSearchPage> {
+  const r = await api<McSearchPage>('mc_search', { q: q.trim(), page, lang: 'fr-FR', sort, categories });
   if (!r || !Array.isArray(r.recipes)) throw new Error('Catalogue illisible.');
   return r;
 }
