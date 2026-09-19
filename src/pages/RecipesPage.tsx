@@ -36,6 +36,17 @@ function fmtTime(sec: number): string {
   return `${Math.floor(sec / 60)}min ${sec % 60}s`;
 }
 
+/** Durée d'en-tête façon site MC : 35 → "35 min", 105 → "1h45", 60 → "1h". */
+function fmtDur(min: number): string {
+  const m = Math.round(min);
+  if (m <= 0) return '';
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  const r = m % 60;
+  if (r === 0) return `${h}h`;
+  return `${h}h${String(r).padStart(2, '0')}`;
+}
+
 /**
  * Bandeau cuisson façon site MC (cf. capture) :
  * pilule « Cuisson personnalisée » + rangée d'icônes
@@ -105,8 +116,8 @@ function CookBadge({ detail, fallback }: { detail?: McCookDetail | null; fallbac
       {detail.label ? (
         <span style={{
           display: 'inline-flex', alignItems: 'center', gap: 8,
-          border: '1.5px solid #d5dbe2', borderRadius: 999, padding: '6px 18px 6px 12px',
-          fontWeight: 700, fontSize: 16, color: '#1c2733', background: '#fff',
+          border: '1.5px solid var(--ion-color-medium)', borderRadius: 999, padding: '6px 18px 6px 12px',
+          fontWeight: 700, fontSize: 16, color: 'var(--ion-text-color)',
         }}>
           <ChefHatIcon size={24} />
           {detail.label}
@@ -115,7 +126,7 @@ function CookBadge({ detail, fallback }: { detail?: McCookDetail | null; fallbac
       {items.length > 0 ? (
         <div style={{
           display: 'flex', flexWrap: 'wrap', gap: '6px 20px',
-          padding: '10px 4px 0', color: '#2e4468', fontSize: 14, fontWeight: 500,
+          padding: '10px 4px 0', color: 'var(--ion-text-color)', fontSize: 14, fontWeight: 500,
         }}>
           {items}
         </div>
@@ -191,6 +202,8 @@ const RecipesPage: React.FC = () => {
   const [toastMsg, setToastMsg] = useState('');
   /** Onglet de la popin recette : ingrédients (ajout liste) ou pas-à-pas. */
   const [detailTab, setDetailTab] = useState<'items' | 'steps'>('items');
+  /** Étapes du pas-à-pas cochées (suivi de préparation). */
+  const [doneSteps, setDoneSteps] = useState<Set<number>>(new Set());
   /** Favoris (cœurs + vue dédiée). */
   const [favs, setFavs] = useState<FavRecipe[]>([]);
   const [favOnly, setFavOnly] = useState(false);
@@ -271,8 +284,18 @@ const RecipesPage: React.FC = () => {
     void runSearch(searchQ, 1, true, sort, next);
   }
 
+  /** Cocher une étape coche aussi toutes celles du dessus ; la décocher libère celle-ci et celles du dessous. */
+  function toggleStep(i: number) {
+    setDoneSteps((prev) => {
+      const next = new Set<number>();
+      const end = prev.has(i) ? i : i + 1;
+      for (let k = 0; k < end; k++) next.add(k);
+      return next;
+    });
+  }
+
   async function loadRecipe(input: string) {
-    setErr(''); setRecipe(null); setDetailTab('items');
+    setErr(''); setRecipe(null); setDetailTab('items'); setDoneSteps(new Set());
     if (!input.trim()) { setErr('Colle l’URL d’une recette monsieur-cuisine.com (ou son ID).'); return; }
     setLoading(true);
     try {
@@ -427,7 +450,7 @@ const RecipesPage: React.FC = () => {
         <IonModal
           className="recipe-modal"
           isOpen={recipe !== null}
-          onDidDismiss={() => { setRecipe(null); setErr(''); }}
+          onDidDismiss={() => { setRecipe(null); setErr(''); setDoneSteps(new Set()); }}
         >
           <IonHeader>
             <IonToolbar>
@@ -459,6 +482,26 @@ const RecipesPage: React.FC = () => {
                 {recipe.pitch ? (
                   <IonText><p style={{ margin: '0 0 8px', fontSize: 14, lineHeight: 1.5 }}>{recipe.pitch}</p></IonText>
                 ) : null}
+                {(recipe.prepMin || recipe.totalMin || recipe.complexity) ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, margin: '0 0 8px', fontSize: 14 }}>
+                    {(recipe.prepMin || recipe.totalMin) ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                        <IonIcon icon={timerOutline} style={{ fontSize: 22, flexShrink: 0 }} />
+                        <span>
+                          {recipe.prepMin ? `Préparation ${fmtDur(recipe.prepMin)}.` : ''}
+                          {recipe.prepMin && recipe.totalMin ? ' ' : ''}
+                          {recipe.totalMin ? `Prêt en ${fmtDur(recipe.totalMin)}.` : ''}
+                        </span>
+                      </span>
+                    ) : null}
+                    {recipe.complexity ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                        <ChefHatIcon size={22} />
+                        <span>{recipe.complexity}</span>
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
                 {recipe.servings ? <IonText color="medium"><p style={{ marginTop: 0 }}>{recipe.servings} • {recipe.groups.flatMap((g) => g.items).length} ingrédient(s)</p></IonText> : null}
                 {err && <IonText color="danger"><p>{err}</p></IonText>}
                 <IonSegment
@@ -466,7 +509,7 @@ const RecipesPage: React.FC = () => {
                   onIonChange={(e) => setDetailTab(e.detail.value === 'steps' ? 'steps' : 'items')}
                 >
                   <IonSegmentButton value="items"><IonLabel>Ingrédients</IonLabel></IonSegmentButton>
-                  <IonSegmentButton value="steps"><IonLabel>Recette</IonLabel></IonSegmentButton>
+                  <IonSegmentButton value="steps"><IonLabel>Recette{doneSteps.size > 0 ? ` (${doneSteps.size}/${recipe.steps.length})` : ''}</IonLabel></IonSegmentButton>
                 </IonSegment>
                 {detailTab === 'items' ? (
                 <>
@@ -520,16 +563,30 @@ const RecipesPage: React.FC = () => {
                 {recipe.steps.length === 0 && (
                   <IonText color="medium"><p>Pas-à-pas non disponible pour cette recette.</p></IonText>
                 )}
+                {recipe.steps.length > 0 && (
+                  <div style={{ display: 'flex', gap: 8, margin: '8px 0' }}>
+                    <IonButton size="small" fill="outline" onClick={() => setDoneSteps(new Set(recipe.steps.map((_, i) => i)))}>Tout</IonButton>
+                    <IonButton size="small" fill="outline" onClick={() => setDoneSteps(new Set())}>Rien</IonButton>
+                  </div>
+                )}
                 <IonList>
-                  {recipe.steps.map((st, i) => (
-                    <IonItem key={i}>
-                      <IonLabel>
-                        <h2>{i + 1}. {st.name || `Étape ${i + 1}`}</h2>
-                        {st.text ? <p style={{ whiteSpace: 'pre-wrap' }}>{st.text}</p> : null}
-                        <CookBadge detail={st.cookDetail} fallback={st.cook} />
-                      </IonLabel>
-                    </IonItem>
-                  ))}
+                  {recipe.steps.map((st, i) => {
+                    const done = doneSteps.has(i);
+                    return (
+                      <IonItem key={i}>
+                        <IonCheckbox
+                          slot="start"
+                          checked={done}
+                          onIonChange={() => toggleStep(i)}
+                        />
+                        <IonLabel style={done ? { opacity: 0.55 } : undefined}>
+                          <h2 style={done ? { textDecoration: 'line-through' } : undefined}>{i + 1}. {st.name || `Étape ${i + 1}`}</h2>
+                          {st.text ? <p style={{ whiteSpace: 'pre-wrap' }}>{st.text}</p> : null}
+                          <CookBadge detail={st.cookDetail} fallback={st.cook} />
+                        </IonLabel>
+                      </IonItem>
+                    );
+                  })}
                 </IonList>
                 </>
                 )}

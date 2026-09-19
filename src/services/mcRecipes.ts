@@ -36,7 +36,7 @@ export interface McRecipeStep {
   order: number;
   name: string;
   text: string;
-  /** Ligne de cuisson MC (compat) : "Rissoler · 130 °C · 4 min · Vitesse 1". */
+  /** Ligne de cuisson MC (compat) : "Saisir · 130 °C · 4 min · Vitesse 1". */
   cook: string;
   cookDetail?: McCookDetail | null;
 }
@@ -47,6 +47,10 @@ export interface McRecipe {
   servings: string;
   /** Pitch / texte de présentation de la recette (description MC). */
   pitch?: string;
+  /** Difficulté ("Facile"...) + durées en minutes (0 = inconnue). */
+  complexity?: string;
+  prepMin?: number;
+  totalMin?: number;
   groups: McIngredientGroup[];
   steps: McRecipeStep[];
   image: string;

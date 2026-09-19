@@ -1017,13 +1017,13 @@ function mc_guess_names(string $apiKey, string $model, string $title, array $kno
 }
 
 /**
- * Libellé de mode MC (comme le site : "Cuisson personnalisée", "Rissoler"...).
+ * Libellé de mode MC (comme le site : "Cuisson personnalisée", "Saisir"...).
  */
 function mc_cook_label(string $norm, $ds): string
 {
     $labels = [
         'scale' => 'Pesée', 'customized' => 'Cuisson personnalisée',
-        'roast' => 'Rissoler', 'slowcook' => 'Mijoter', 'slowcooking' => 'Mijoter',
+        'roast' => 'Saisir', 'roasting' => 'Saisir', 'slowcook' => 'Mijoter', 'slowcooking' => 'Mijoter',
         'steam' => 'Vapeur', 'knead' => 'Pétrir', 'doughkneading' => 'Pétrir',
         'sousvide' => 'Sous-vide', 'turbo' => 'Turbo',
         'precleaning' => 'Prélavage', 'preclean' => 'Prélavage',
@@ -1067,7 +1067,7 @@ function mc_cook_detail($ds): ?array
 
 /**
  * Ligne de cuisson MC lisible depuis deviceSetting (compat) :
- * "Rissoler · 130 °C · 4 min · Vitesse 1 · À droite".
+ * "Saisir · 130 °C · 4 min · Vitesse 1 · À droite".
  * time en secondes, weight en g. '' si rien d'exploitable.
  */
 function mc_cook_line($ds): string
@@ -1161,6 +1161,51 @@ function mc_pick_pitch(array $recipe, array $serving): string
 }
 
 /**
+ * Méta d'en-tête : difficulté + durées (minutes).
+ * Champs v2 public (preparationDuration, duration, complexity) et
+ * variantes v3 auth. Durées bornées 0..1440, '' si inconnue.
+ * Retourne [complexity, prepMin, totalMin].
+ */
+function mc_pick_meta(array $recipe, array $serving): array
+{
+    $complexity = '';
+    foreach (['complexity', 'difficulty', 'level'] as $k) {
+        if (isset($recipe[$k]) && is_string($recipe[$k]) && trim($recipe[$k]) !== '') {
+            $complexity = trim($recipe[$k]);
+            break;
+        }
+    }
+    if ($complexity === '') {
+        $lvl = $recipe['complexityLevel'] ?? $serving['complexityLevel'] ?? null;
+        if (is_numeric($lvl)) {
+            $lvl = (int) $lvl;
+            if ($lvl <= 1) $complexity = 'Facile';
+            elseif ($lvl == 2) $complexity = 'Moyen';
+            else $complexity = 'Difficile';
+        }
+    }
+    if (mb_strlen($complexity) > 30) $complexity = mb_substr($complexity, 0, 30);
+    $num = function ($v): int {
+        if (!is_numeric($v)) return 0;
+        $m = (int) round((float) $v);
+        if ($m < 0) $m = 0;
+        if ($m > 1440) $m = 1440;
+        return $m;
+    };
+    $prep = 0;
+    foreach (['preparationDuration', 'preparationTime', 'prepDuration', 'prepTime'] as $k) {
+        $prep = $num($recipe[$k] ?? $serving[$k] ?? 0);
+        if ($prep > 0) break;
+    }
+    $total = 0;
+    foreach (['duration', 'totalDuration', 'totalTime', 'cookTime'] as $k) {
+        $total = $num($recipe[$k] ?? $serving[$k] ?? 0);
+        if ($total > 0) break;
+    }
+    return [$complexity, $prep, $total];
+}
+
+/**
  * Photo principale d'une recette (détail HD puis vignette).
  */
 function mc_pick_image(array $recipe): string
@@ -1215,6 +1260,9 @@ if ($action === 'mc_recipe') {
     $title = '';
     $servings = '';
     $pitch = '';
+    $complexity = '';
+    $prepMin = 0;
+    $totalMin = 0;
     $groups = null;
     $steps = [];
     $image = '';
@@ -1245,6 +1293,7 @@ if ($action === 'mc_recipe') {
                     $servings = trim((string) $serving['amount'] . ' ' . trim((string) ($serving['unit'] ?? 'parts')));
                 }
                 if ($pitch === '') $pitch = mc_pick_pitch($recipe, $serving);
+                [$complexity, $prepMin, $totalMin] = mc_pick_meta($recipe, $serving);
                 $steps = mc_parse_steps($serving);
                 $tmp = [];
                 $ig = (isset($serving['ingredientGroups']) && is_array($serving['ingredientGroups'])) ? $serving['ingredientGroups'] : [];
@@ -1298,6 +1347,7 @@ if ($action === 'mc_recipe') {
                 $servings = trim((string) $serving['amount'] . ' ' . trim((string) ($serving['servingUnit'] ?? $serving['unit'] ?? 'parts')));
             }
             if ($pitch === '') $pitch = mc_pick_pitch($recipe, $serving);
+            if ($complexity === '' && $prepMin === 0 && $totalMin === 0) [$complexity, $prepMin, $totalMin] = mc_pick_meta($recipe, $serving);
             $steps = mc_parse_steps($serving);
             $gNames = [];
             $ig = (isset($serving['ingredientGroups']) && is_array($serving['ingredientGroups'])) ? $serving['ingredientGroups'] : [];
@@ -1375,7 +1425,7 @@ if ($action === 'mc_recipe') {
         fail('Recette ' . $id . ' introuvable (privé : ' . $authInfo . ' ; public : ' . $pubInfo . ').', 404);
     }
     if ($title === '') $title = 'Recette MC ' . $id;
-    out(['ok' => true, 'recipe' => ['id' => $id, 'title' => $title, 'servings' => $servings, 'pitch' => $pitch, 'groups' => $groups, 'steps' => $steps, 'image' => $image]]);
+    out(['ok' => true, 'recipe' => ['id' => $id, 'title' => $title, 'servings' => $servings, 'pitch' => $pitch, 'complexity' => $complexity, 'prepMin' => $prepMin, 'totalMin' => $totalMin, 'groups' => $groups, 'steps' => $steps, 'image' => $image]]);
 }
 
 if ($action === 'mc_categories') {
