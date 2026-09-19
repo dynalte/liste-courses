@@ -948,7 +948,7 @@ function mc_sys_names(string $lang): array
  * membres) via Gemini : contexte titre + ingrédients connus + qté/catégorie.
  * Retourne [idx => nom]. Best effort : échec → tableau vide.
  */
-function mc_guess_names(string $apiKey, string $model, string $title, array $known, array $unknown): array
+function mc_guess_names(string $apiKey, string $model, string $title, array $known, array $unknown, string $stepsText = ''): array
 {
     if ($apiKey === '' || count($unknown) === 0) return [];
     if (!preg_match('/^[a-zA-Z0-9_.-]{1,60}$/', $model)) $model = 'gemini-2.0-flash';
@@ -960,9 +960,15 @@ function mc_guess_names(string $apiKey, string $model, string $title, array $kno
     }
     $prompt = 'Recette Monsieur Cuisine « ' . mb_substr($title, 0, 80) . ' ».' . "\n"
         . 'Ingrédients connus : ' . implode(' ; ', array_slice($known, 0, 30)) . "\n"
-        . 'Ingrédients à identifier (index : quantité + catégorie) :' . "\n" . implode("\n", $lines) . "\n"
-        . 'Réponds UNIQUEMENT un objet JSON {"index":"nom d’ingrédient en français"} '
-        . '(noms courts de courses, ex : "Farine de blé"). Sans explication.';
+        . 'Ingrédients à identifier (index : quantité + catégorie) :' . "\n" . implode("\n", $lines) . "\n";
+    if ($stepsText !== '') {
+        $prompt .= 'Pas-à-pas qui cite les ingrédients (source de vérité pour les noms) :' . "\n" . mb_substr($stepsText, 0, 1500) . "\n";
+    }
+    $prompt .= 'Donne le nom EXACT du produit tel qu’acheté en magasin, sans le raccourcir ni le banaliser : '
+        . '« Concentré de tomate » (jamais « Tomate »), « Fécule de maïs » (jamais « Maïs »), '
+        . '« Sucre en poudre » seulement si le pas-à-pas parle bien de sucre, '
+        . '« Sauce soja sucrée » (jamais « Sauce soja »). En cas de vrai doute, réponds "" pour cet index. '
+        . 'Réponds UNIQUEMENT un objet JSON {"index":"nom en français"} (noms courts). Sans explication.';
     $body = json_encode([
         'contents' => [['parts' => [['text' => $prompt]]]],
         'generationConfig' => ['temperature' => 0.2, 'maxOutputTokens' => 256, 'responseMimeType' => 'application/json'],
@@ -1206,6 +1212,41 @@ function mc_pick_meta(array $recipe, array $serving): array
 }
 
 /**
+ * Nombre brut d'une quantité MC (number ou string "60"/"0,48"), sinon null.
+ */
+function mc_num($v) {
+    if (is_int($v) || is_float($v)) return (float) $v;
+    if (is_string($v)) {
+        $t = trim(str_replace(',', '.', $v));
+        if (preg_match('/^-?\d+(?:\.\d+)?$/', $t)) return (float) $t;
+    }
+    return null;
+}
+
+/**
+ * Portion de référence : celle marquée defaultServingSizeId, sinon la 1re.
+ */
+function mc_pick_serving(array $recipe): array
+{
+    $all = (isset($recipe['servingSizes']) && is_array($recipe['servingSizes'])) ? array_values($recipe['servingSizes']) : [];
+    if (count($all) > 0) {
+        $serving = (is_array($all[0]) ? $all[0] : []);
+        $defId = $recipe['defaultServingSizeId'] ?? null;
+        if ($defId !== null) {
+            foreach ($all as $s) {
+                if (is_array($s) && ($s['id'] ?? null) == $defId) {
+                    $serving = $s;
+                    break;
+                }
+            }
+        }
+        return $serving;
+    }
+    if (isset($recipe['servingSize']) && is_array($recipe['servingSize'])) return $recipe['servingSize'];
+    return [];
+}
+
+/**
  * Photo principale d'une recette (détail HD puis vignette).
  */
 function mc_pick_image(array $recipe): string
@@ -1259,6 +1300,8 @@ if ($action === 'mc_recipe') {
 
     $title = '';
     $servings = '';
+    $servingsNum = 0;
+    $skipped = 0;
     $pitch = '';
     $complexity = '';
     $prepMin = 0;
@@ -1283,14 +1326,10 @@ if ($action === 'mc_recipe') {
             if (is_array($recipe)) {
                 $title = trim((string) ($recipe['title'] ?? $recipe['name'] ?? ''));
                 $image = mc_pick_image($recipe);
-                $serving = [];
-                if (isset($recipe['servingSizes']) && is_array($recipe['servingSizes']) && isset($recipe['servingSizes'][0]) && is_array($recipe['servingSizes'][0])) {
-                    $serving = $recipe['servingSizes'][0];
-                } elseif (isset($recipe['servingSize']) && is_array($recipe['servingSize'])) {
-                    $serving = $recipe['servingSize'];
-                }
+                $serving = mc_pick_serving($recipe);
                 if (is_numeric($serving['amount'] ?? null)) {
                     $servings = trim((string) $serving['amount'] . ' ' . trim((string) ($serving['unit'] ?? 'parts')));
+                    $servingsNum = (float) $serving['amount'];
                 }
                 if ($pitch === '') $pitch = mc_pick_pitch($recipe, $serving);
                 [$complexity, $prepMin, $totalMin] = mc_pick_meta($recipe, $serving);
@@ -1304,7 +1343,7 @@ if ($action === 'mc_recipe') {
                     foreach ($ing as $in) {
                         if (!is_array($in)) continue;
                         $nm = trim((string) ($in['name'] ?? ''));
-                        if ($nm === '') continue;
+                        if ($nm === '') { $skipped++; continue; }
                         if (mb_strlen($nm) > 120) $nm = mb_substr($nm, 0, 120);
                         $qtyParts = [];
                         $amount = $in['amount'] ?? null;
@@ -1318,7 +1357,7 @@ if ($action === 'mc_recipe') {
                         if ($unit !== '') $qtyParts[] = $unit;
                         $qty = trim(implode(' ', $qtyParts));
                         if (mb_strlen($qty) > 30) $qty = mb_substr($qty, 0, 30);
-                        $items[] = ['name' => $nm, 'qty' => $qty, 'optional' => !empty($in['isOptional'])];
+                        $items[] = ['name' => $nm, 'qty' => $qty, 'optional' => !empty($in['isOptional']), 'amount' => mc_num($amount), 'unit' => $unit];
                     }
                     if (count($items) === 0) continue;
                     $tmp[] = ['name' => trim((string) ($g['name'] ?? '')), 'items' => $items];
@@ -1342,9 +1381,10 @@ if ($action === 'mc_recipe') {
         if ($httpCode >= 200 && $httpCode < 300 && is_array($recipe)) {
             $title = trim((string) ($recipe['name'] ?? $recipe['title'] ?? ''));
             $image = mc_pick_image($recipe);
-            $serving = (isset($recipe['servingSizes'][0]) && is_array($recipe['servingSizes'][0])) ? $recipe['servingSizes'][0] : [];
+            $serving = mc_pick_serving($recipe);
             if (is_numeric($serving['amount'] ?? null)) {
                 $servings = trim((string) $serving['amount'] . ' ' . trim((string) ($serving['servingUnit'] ?? $serving['unit'] ?? 'parts')));
+                $servingsNum = (float) $serving['amount'];
             }
             if ($pitch === '') $pitch = mc_pick_pitch($recipe, $serving);
             if ($complexity === '' && $prepMin === 0 && $totalMin === 0) [$complexity, $prepMin, $totalMin] = mc_pick_meta($recipe, $serving);
@@ -1387,13 +1427,14 @@ if ($action === 'mc_recipe') {
                     $order[] = $gid;
                 }
                 $pos = count($byGroup[$gid]);
-                $byGroup[$gid][] = ['name' => $nm, 'qty' => $qty, 'optional' => false];
+                $byGroup[$gid][] = ['name' => $nm, 'qty' => $qty, 'optional' => false, 'amount' => mc_num($amount), 'unit' => $unit];
                 if ($nm === '') {
                     $uIdx++;
                     $unknown['u' . $uIdx] = ['gid' => $gid, 'pos' => $pos, 'qty' => $qty, 'cat' => $cat];
                 }
             }
-            // Noms manquants (créations de membres hors référentiel) : devinette IA.
+            // Noms manquants (créations de membres hors référentiel) : devinette IA,
+            // aidée du pas-à-pas qui cite les ingrédients.
             if (count($unknown) > 0 && $geminiKey !== '') {
                 $known = [];
                 foreach ($byGroup as $items) {
@@ -1401,7 +1442,12 @@ if ($action === 'mc_recipe') {
                         if ($it['name'] !== '') $known[] = trim($it['qty'] . ' ' . $it['name']);
                     }
                 }
-                $guessed = mc_guess_names($geminiKey, $geminiModel, $title, $known, $unknown);
+                $stepsText = '';
+                foreach ($steps as $st) {
+                    $bit = trim(trim((string) ($st['name'] ?? '')) . ' : ' . trim((string) ($st['text'] ?? '')), ' :');
+                    if ($bit !== '') $stepsText .= $bit . "\n";
+                }
+                $guessed = mc_guess_names($geminiKey, $geminiModel, $title, $known, $unknown, $stepsText);
                 foreach ($unknown as $idx => $ref) {
                     if (isset($guessed[$idx])) {
                         $byGroup[$ref['gid']][$ref['pos']]['name'] = $guessed[$idx];
@@ -1417,6 +1463,28 @@ if ($action === 'mc_recipe') {
                 if (count($items) === 0) continue;
                 $tmp[] = ['name' => ($gid !== '' ? ($gNames[$gid] ?? '') : ''), 'items' => $items];
             }
+            // Non identifiés (ni référentiel ni IA) : placeholders ❓ visibles
+            // (jamais jetés), avec la catégorie en indice. Décochés par défaut.
+            foreach ($unknown as $idx => $ref) {
+                $cur = $byGroup[$ref['gid']][$ref['pos']]['name'] ?? '';
+                if ($cur !== '') continue;
+                $skipped++;
+                $hint = trim((string) ($ref['cat'] ?? ''));
+                $byGroup[$ref['gid']][$ref['pos']] = [
+                    'name' => '❓ À identifier' . ($hint !== '' ? ' · ' . $hint : ''),
+                    'qty' => $ref['qty'], 'optional' => false,
+                    'amount' => null, 'unit' => '', 'unknown' => true,
+                ];
+            }
+            $tmp = [];
+            foreach ($order as $gid) {
+                $items = [];
+                foreach ($byGroup[$gid] as $it) {
+                    if (($it['name'] ?? '') !== '') $items[] = $it;
+                }
+                if (count($items) === 0) continue;
+                $tmp[] = ['name' => ($gid !== '' ? ($gNames[$gid] ?? '') : ''), 'items' => $items];
+            }
             if (count($tmp) > 0) $groups = $tmp;
         }
     }
@@ -1425,7 +1493,7 @@ if ($action === 'mc_recipe') {
         fail('Recette ' . $id . ' introuvable (privé : ' . $authInfo . ' ; public : ' . $pubInfo . ').', 404);
     }
     if ($title === '') $title = 'Recette MC ' . $id;
-    out(['ok' => true, 'recipe' => ['id' => $id, 'title' => $title, 'servings' => $servings, 'pitch' => $pitch, 'complexity' => $complexity, 'prepMin' => $prepMin, 'totalMin' => $totalMin, 'groups' => $groups, 'steps' => $steps, 'image' => $image]]);
+    out(['ok' => true, 'recipe' => ['id' => $id, 'title' => $title, 'servings' => $servings, 'servingsNum' => $servingsNum, 'skipped' => $skipped, 'pitch' => $pitch, 'complexity' => $complexity, 'prepMin' => $prepMin, 'totalMin' => $totalMin, 'groups' => $groups, 'steps' => $steps, 'image' => $image]]);
 }
 
 if ($action === 'mc_categories') {

@@ -29,6 +29,8 @@ Réponse détail v2 (`data.recipe`) :
 - Titre = champ **`name`** (pas `title`). Durées = `preparationDuration`,
   `duration`. Photo = `detailsImage.landscape ?? thumbnail.landscape`.
 - Portions : `servingSizes[0].amount` + **`servingUnit`** (pas `unit`).
+  Le PHP expose aussi `servingsNum` (nombre brut) pour la mise à l'échelle,
+  et chaque ingrédient porte `amount` (float|null, `"0,48"` → 0.48) + `unit`.
 - Ingrédients **à plat** : `servingSizes[0].ingredients[]` =
   `{order, amount (STRING, ex "60"), unit, systemIngredientId,
   ingredientGroupId (souvent null), name (souvent null!), ingredientCategory

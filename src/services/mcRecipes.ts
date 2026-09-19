@@ -13,6 +13,11 @@ export interface McIngredient {
   name: string;
   qty: string;
   optional: boolean;
+  /** Quantité brute (pour mise à l'échelle) + unité, si parsables. */
+  amount: number | null;
+  unit: string;
+  /** Placeholder "❓ À identifier" : jamais pré-coché, exclu du Tout. */
+  unknown?: boolean;
 }
 
 export interface McIngredientGroup {
@@ -45,6 +50,10 @@ export interface McRecipe {
   id: string;
   title: string;
   servings: string;
+  /** Portions de base (0 = inconnues → pas de mise à l'échelle). */
+  servingsNum: number;
+  /** Ingrédients sans nom ignorés (non résolus). */
+  skipped: number;
   /** Pitch / texte de présentation de la recette (description MC). */
   pitch?: string;
   /** Difficulté ("Facile"...) + durées en minutes (0 = inconnue). */

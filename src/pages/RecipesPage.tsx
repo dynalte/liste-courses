@@ -11,7 +11,20 @@ import {
   scaleOutline, flashOutline,
 } from 'ionicons/icons';
 import { listsApi, favApi, type ShoppingList, type FavRecipe } from '../services/serverApi';
-import { fetchMcRecipe, searchMcRecipes, fetchMcCategories, type McRecipe, type McSearchResult, type McCategory, type McSort, type McCookDetail } from '../services/mcRecipes';
+import { fetchMcRecipe, searchMcRecipes, fetchMcCategories, type McRecipe, type McSearchResult, type McCategory, type McSort, type McIngredient, type McCookDetail } from '../services/mcRecipes';
+
+/** Formate un nombre à la française (1 décimale max : 1,5). */
+function fmtNum(v: number): string {
+  const r = Math.round(v * 10) / 10;
+  return Number.isInteger(r) ? String(r) : String(r).replace('.', ',');
+}
+
+/** Quantité mise à l'échelle (×facteur) ou texte d'origine si non parsable. */
+function scaledQty(it: McIngredient, factor: number): string {
+  if (it.amount === null || it.amount === undefined || factor === 1) return it.qty;
+  const num = fmtNum(it.amount * factor);
+  return it.unit ? `${num} ${it.unit}` : num;
+}
 import { suggestRayon } from '../services/rayons';
 
 /** Toque de chef (contour, comme le site MC) pour le bandeau cuisson. */
@@ -202,6 +215,8 @@ const RecipesPage: React.FC = () => {
   const [toastMsg, setToastMsg] = useState('');
   /** Onglet de la popin recette : ingrédients (ajout liste) ou pas-à-pas. */
   const [detailTab, setDetailTab] = useState<'items' | 'steps'>('items');
+  /** Portions voulues (null = base inconnue → pas de mise à l'échelle). */
+  const [portions, setPortions] = useState<number | null>(null);
   /** Étapes du pas-à-pas cochées (suivi de préparation). */
   const [doneSteps, setDoneSteps] = useState<Set<number>>(new Set());
   /** Favoris (cœurs + vue dédiée). */
@@ -210,6 +225,9 @@ const RecipesPage: React.FC = () => {
 
   const actives = lists.filter((l) => !l.archived && !l.isTemplate);
   const active = actives.find((l) => l.id === activeId) ?? actives[0] ?? null;
+  /** Facteur de mise à l'échelle des quantités (portions voulues / base). */
+  const portionFactor =
+    recipe && portions !== null && recipe.servingsNum > 0 ? portions / recipe.servingsNum : 1;
 
   useEffect(() => {
     listsApi.get()
@@ -295,16 +313,17 @@ const RecipesPage: React.FC = () => {
   }
 
   async function loadRecipe(input: string) {
-    setErr(''); setRecipe(null); setDetailTab('items'); setDoneSteps(new Set());
+    setErr(''); setRecipe(null); setDetailTab('items'); setDoneSteps(new Set()); setPortions(null);
     if (!input.trim()) { setErr('Colle l’URL d’une recette monsieur-cuisine.com (ou son ID).'); return; }
     setLoading(true);
     try {
       const r = await fetchMcRecipe(input.trim());
       setRecipe(r);
-      // Par défaut : tout coché sauf optionnels et basiques (sel, poivre…).
+      setPortions(r.servingsNum > 0 ? r.servingsNum : null);
+      // Par défaut : tout coché sauf optionnels, basiques et ❓ non identifiés.
       const next = new Set<string>();
       r.groups.forEach((gr, gi) => gr.items.forEach((it, ii) => {
-        if (!it.optional && !isStaple(it.name)) next.add(key(gi, ii));
+        if (!it.optional && !it.unknown && !isStaple(it.name)) next.add(key(gi, ii));
       }));
       setChecked(next);
     } catch (e) {
@@ -318,7 +337,9 @@ const RecipesPage: React.FC = () => {
     if (!recipe) return;
     if (!on) { setChecked(new Set()); return; }
     const next = new Set<string>();
-    recipe.groups.forEach((gr, gi) => gr.items.forEach((_it, ii) => next.add(key(gi, ii))));
+    recipe.groups.forEach((gr, gi) => gr.items.forEach((it, ii) => {
+      if (!it.unknown) next.add(key(gi, ii));
+    }));
     setChecked(next);
   }
 
@@ -328,7 +349,7 @@ const RecipesPage: React.FC = () => {
     if (!active) { setErr('Crée d’abord une liste (onglet Courses).'); return; }
     const picked: Array<{ name: string; qty: string; rayon: string }> = [];
     recipe.groups.forEach((gr, gi) => gr.items.forEach((it, ii) => {
-      if (checked.has(key(gi, ii))) picked.push({ name: it.name, qty: it.qty, rayon: suggestRayon(it.name) });
+      if (checked.has(key(gi, ii))) picked.push({ name: it.name, qty: scaledQty(it, portionFactor), rayon: suggestRayon(it.name) });
     }));
     if (picked.length === 0) { setErr('Coche au moins un ingrédient.'); return; }
     // Chaque ingrédient porte sa recette : « Farine (Pizza napolitaine) ».
@@ -502,7 +523,18 @@ const RecipesPage: React.FC = () => {
                     ) : null}
                   </div>
                 ) : null}
-                {recipe.servings ? <IonText color="medium"><p style={{ marginTop: 0 }}>{recipe.servings} • {recipe.groups.flatMap((g) => g.items).length} ingrédient(s)</p></IonText> : null}
+                {recipe.servingsNum > 0 && portions !== null ? (
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '4px 0' }}>
+                    <IonButton size="small" fill="outline" onClick={() => setPortions(Math.max(1, portions - 1))}>−</IonButton>
+                    <IonText><b>🍽 {portions} portion{portions > 1 ? 's' : ''}</b></IonText>
+                    <IonButton size="small" fill="outline" onClick={() => setPortions(Math.min(24, portions + 1))}>+</IonButton>
+                    {portionFactor !== 1 ? (
+                      <IonText color="medium" style={{ fontSize: 12 }}>quantités ×{fmtNum(portionFactor)}</IonText>
+                    ) : null}
+                  </div>
+                ) : (
+                  recipe.servings ? <IonText color="medium"><p style={{ marginTop: 0 }}>{recipe.servings} • {recipe.groups.flatMap((g) => g.items).length} ingrédient(s)</p></IonText> : null
+                )}
                 {err && <IonText color="danger"><p>{err}</p></IonText>}
                 <IonSegment
                   value={detailTab}
@@ -537,7 +569,10 @@ const RecipesPage: React.FC = () => {
                           />
                           <IonLabel>
                             <h2>{it.name}{it.optional ? ' (optionnel)' : ''}</h2>
-                            {it.qty ? <p>{it.qty}</p> : null}
+                            {(() => {
+                              const q = scaledQty(it, portionFactor);
+                              return q ? <p>{q}</p> : null;
+                            })()}
                           </IonLabel>
                         </IonItem>
                       ))}
@@ -564,7 +599,7 @@ const RecipesPage: React.FC = () => {
                   <IonText color="medium"><p>Pas-à-pas non disponible pour cette recette.</p></IonText>
                 )}
                 {recipe.steps.length > 0 && (
-                  <div style={{ display: 'flex', gap: 8, margin: '8px 0' }}>
+                <div style={{ display: 'flex', gap: 8, margin: '8px 0' }}>
                     <IonButton size="small" fill="outline" onClick={() => setDoneSteps(new Set(recipe.steps.map((_, i) => i)))}>Tout</IonButton>
                     <IonButton size="small" fill="outline" onClick={() => setDoneSteps(new Set())}>Rien</IonButton>
                   </div>
@@ -582,7 +617,14 @@ const RecipesPage: React.FC = () => {
                         <IonLabel style={done ? { opacity: 0.55 } : undefined}>
                           <h2 style={done ? { textDecoration: 'line-through' } : undefined}>{i + 1}. {st.name || `Étape ${i + 1}`}</h2>
                           {st.text ? <p style={{ whiteSpace: 'pre-wrap' }}>{st.text}</p> : null}
-                          <CookBadge detail={st.cookDetail} fallback={st.cook} />
+                          <CookBadge
+                            detail={
+                              st.cookDetail && st.cookDetail.weight !== null && st.cookDetail.weight !== undefined && portionFactor !== 1
+                                ? { ...st.cookDetail, weight: Math.round(st.cookDetail.weight * portionFactor * 10) / 10 }
+                                : st.cookDetail
+                            }
+                            fallback={st.cook}
+                          />
                         </IonLabel>
                       </IonItem>
                     );
