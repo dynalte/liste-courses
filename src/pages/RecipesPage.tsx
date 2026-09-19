@@ -3,11 +3,50 @@ import {
   IonPage, IonHeader, IonToolbar, IonTitle, IonContent, IonList, IonItem,
   IonLabel, IonCheckbox, IonButton, IonText, IonChip, IonToast,
   IonThumbnail, IonSearchbar, IonModal, IonButtons, IonFooter,
-  IonSegment, IonSegmentButton,
+  IonSegment, IonSegmentButton, IonIcon,
 } from '@ionic/react';
-import { listsApi, type ShoppingList } from '../services/serverApi';
+import { heart, heartOutline } from 'ionicons/icons';
+import { listsApi, favApi, type ShoppingList, type FavRecipe } from '../services/serverApi';
 import { fetchMcRecipe, searchMcRecipes, fetchMcCategories, type McRecipe, type McSearchResult, type McCategory, type McSort } from '../services/mcRecipes';
 import { suggestRayon } from '../services/rayons';
+
+/**
+ * Basiques déjà chez tout le monde : non pré-cochés à l'import recette
+ * (forme normalisée : minuscules, sans accents ni apostrophes).
+ */
+const STAPLES = new Set([
+  // Sels
+  'sel', 'sel fin', 'gros sel', 'fleur de sel', 'sel de guerande', 'sel aux herbes',
+  'sel et poivre',
+  // Poivres & piments secs
+  'poivre', 'poivre noir', 'poivre blanc', 'poivre gris', 'poivre moulu',
+  'poivre du moulin', 'poivre en grains', 'poivre 5 baies',
+  'piment', 'piment doux', 'piment de cayenne', 'piment despelette', 'piment en poudre',
+  'paprika', 'paprika doux',
+  // Eaux
+  'eau', 'eau chaude', 'eau froide', 'eau bouillante', 'eau tiede',
+  // Huiles
+  'huile', 'huile dolive', 'huile neutre', 'huile de tournesol', 'huile de colza',
+  'filet dhuile', 'filet dhuile dolive', 'un filet dhuile', 'un filet dhuile dolive',
+  // Vinaigres
+  'vinaigre', 'vinaigre blanc', 'vinaigre balsamique', 'vinaigre de cidre',
+  'vinaigre de vin', 'vinaigre de vin rouge',
+  // Sucres
+  'sucre', 'sucre en poudre', 'sucre semoule', 'sucre glace', 'sucre vanille', 'sucre roux',
+  // Farines & fécules
+  'farine', 'farine de ble', 'farine t55', 'farine t65', 'farine fluide',
+  'maizena', 'fecule de mais', 'fecule',
+  // Levure
+  'levure chimique', 'poudre a lever',
+  // Moutarde
+  'moutarde', 'moutarde de dijon', 'moutarde a lancienne',
+  // Herbes & aromates séchés
+  'thym', 'laurier', 'feuille de laurier', 'romarin', 'origan', 'herbes de provence',
+  // Épices de base
+  'cumin', 'cumin moulu', 'curry', 'curry en poudre', 'curcuma',
+  'cannelle', 'cannelle en poudre', 'muscade', 'noix de muscade',
+  'gingembre moulu', 'clou de girofle', 'quatre-epices', 'quatre epices',
+]);
 
 /**
  * PROTOTYPE — Recettes Monsieur Cuisine → liste de courses.
@@ -38,6 +77,9 @@ const RecipesPage: React.FC = () => {
   const [toastMsg, setToastMsg] = useState('');
   /** Onglet de la popin recette : ingrédients (ajout liste) ou pas-à-pas. */
   const [detailTab, setDetailTab] = useState<'items' | 'steps'>('items');
+  /** Favoris (cœurs + vue dédiée). */
+  const [favs, setFavs] = useState<FavRecipe[]>([]);
+  const [favOnly, setFavOnly] = useState(false);
 
   const actives = lists.filter((l) => !l.archived && !l.isTemplate);
   const active = actives.find((l) => l.id === activeId) ?? actives[0] ?? null;
@@ -50,14 +92,42 @@ const RecipesPage: React.FC = () => {
         if (first) setActiveId(first.id);
       })
       .catch(() => {});
-    // Catalogue : nouveautés par défaut + liste des catégories.
+    // Catalogue : nouveautés par défaut + liste des catégories + favoris.
     void runSearch('', 1, true, 'new', []);
     fetchMcCategories().then(setCategories).catch(() => {});
+    refreshFavs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const favIds = new Set(favs.map((f) => f.recipeId));
+
+  async function refreshFavs() {
+    try {
+      const r = await favApi.list();
+      setFavs(r.favorites);
+    } catch {
+      /* favoris indisponibles : le reste fonctionne */
+    }
+  }
+
+  async function toggleFav(recipeId: string, title = '', image = '') {
+    try {
+      if (favIds.has(recipeId)) await favApi.remove(recipeId);
+      else await favApi.add(recipeId, title, image);
+      await refreshFavs();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   function key(g: number, i: number) {
     return `${g}:${i}`;
+  }
+
+  /** Basiques que tout le monde a déjà (non pré-cochés à l'import). */
+  function isStaple(name: string): boolean {
+    const norm = name.trim().toLowerCase().normalize('NFD').replace(/['’]/g, '').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ');
+    return STAPLES.has(norm);
   }
 
   /** Recherche catalogue (q vide = suggestion selon le tri). */
@@ -94,10 +164,10 @@ const RecipesPage: React.FC = () => {
     try {
       const r = await fetchMcRecipe(input.trim());
       setRecipe(r);
-      // Par défaut : tout coché sauf les optionnels.
+      // Par défaut : tout coché sauf optionnels et basiques (sel, poivre…).
       const next = new Set<string>();
       r.groups.forEach((gr, gi) => gr.items.forEach((it, ii) => {
-        if (!it.optional) next.add(key(gi, ii));
+        if (!it.optional && !isStaple(it.name)) next.add(key(gi, ii));
       }));
       setChecked(next);
     } catch (e) {
@@ -150,15 +220,17 @@ const RecipesPage: React.FC = () => {
           debounce={600}
         />
         <IonSegment
-          value={sort}
+          value={favOnly ? 'favs' : sort}
           onIonChange={(e) => {
-            const s = e.detail.value as McSort;
-            if (s === 'new' || s === 'popular' || s === 'top') changeSort(s);
+            const s = String(e.detail.value ?? '');
+            if (s === 'favs') { setFavOnly(true); return; }
+            if (s === 'new' || s === 'popular' || s === 'top') { setFavOnly(false); changeSort(s); }
           }}
         >
           <IonSegmentButton value="new"><IonLabel>Nouveautés</IonLabel></IonSegmentButton>
           <IonSegmentButton value="popular"><IonLabel>Populaires</IonLabel></IonSegmentButton>
           <IonSegmentButton value="top"><IonLabel>Mieux notées</IonLabel></IonSegmentButton>
+          <IonSegmentButton value="favs"><IonLabel>❤ Favoris{favs.length > 0 ? ` (${favs.length})` : ''}</IonLabel></IonSegmentButton>
         </IonSegment>
         {categories.length > 0 && (
           <div style={{ display: 'flex', gap: 6, overflowX: 'auto', padding: '8px 2px' }}>
@@ -175,7 +247,33 @@ const RecipesPage: React.FC = () => {
             ))}
           </div>
         )}
-        {results.length > 0 && (
+        {favOnly ? (
+          <>
+            <p className="cal-heading">❤ Favoris ({favs.length})</p>
+            {favs.length === 0 && (
+              <IonText color="medium"><p>Touche le cœur d’une recette pour la retrouver ici.</p></IonText>
+            )}
+            <IonList>
+              {favs.map((f) => (
+                <IonItem key={f.recipeId} button onClick={() => void loadRecipe(f.recipeId)}>
+                  {f.image ? <IonThumbnail slot="start"><img src={f.image} alt="" loading="lazy" /></IonThumbnail> : null}
+                  <IonLabel>
+                    <h2>{f.title || `Recette ${f.recipeId}`}</h2>
+                  </IonLabel>
+                  <IonButton
+                    slot="end"
+                    fill="clear"
+                    color="danger"
+                    onClick={(ev) => { ev.stopPropagation(); void toggleFav(f.recipeId); }}
+                  >
+                    <IonIcon icon={heart} slot="icon-only" />
+                  </IonButton>
+                </IonItem>
+              ))}
+            </IonList>
+          </>
+        ) : (
+        results.length > 0 && (
           <>
             <p className="cal-heading">📖 {total} recette(s)</p>
             <IonList>
@@ -190,6 +288,14 @@ const RecipesPage: React.FC = () => {
                     </p>
                     {r.categories.length > 0 ? <p>{r.categories.join(' • ')}</p> : null}
                   </IonLabel>
+                  <IonButton
+                    slot="end"
+                    fill="clear"
+                    color={favIds.has(r.id) ? 'danger' : 'medium'}
+                    onClick={(ev) => { ev.stopPropagation(); void toggleFav(r.id, r.name, r.image); }}
+                  >
+                    <IonIcon icon={favIds.has(r.id) ? heart : heartOutline} slot="icon-only" />
+                  </IonButton>
                 </IonItem>
               ))}
             </IonList>
@@ -199,6 +305,7 @@ const RecipesPage: React.FC = () => {
               </IonButton>
             )}
           </>
+        )
         )}
         {err && !recipe && <IonText color="danger"><p>{err}</p></IonText>}
 
@@ -212,6 +319,14 @@ const RecipesPage: React.FC = () => {
             <IonToolbar>
               <IonTitle>{recipe?.title ?? 'Recette'}</IonTitle>
               <IonButtons slot="end">
+                {recipe && (
+                  <IonButton
+                    color={favIds.has(recipe.id) ? 'danger' : 'medium'}
+                    onClick={() => void toggleFav(recipe.id, recipe.title, recipe.image)}
+                  >
+                    <IonIcon icon={favIds.has(recipe.id) ? heart : heartOutline} slot="icon-only" />
+                  </IonButton>
+                )}
                 <IonButton onClick={() => { setRecipe(null); setErr(''); }}>Fermer</IonButton>
               </IonButtons>
             </IonToolbar>

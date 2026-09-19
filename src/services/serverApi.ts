@@ -170,6 +170,21 @@ export interface DietEntry {
   hasPhoto: boolean;
 }
 
+/** Recettes MC favorites (par utilisateur). */
+export interface FavRecipe {
+  recipeId: string;
+  title: string;
+  image: string;
+  addedAt: number;
+}
+
+export const favApi = {
+  list: () => api<{ favorites: FavRecipe[] }>('fav_list', {}, 'POST'),
+  add: (recipeId: string, title = '', image = '') =>
+    api<{ ok: boolean }>('fav_add', { recipeId, title, image }),
+  remove: (recipeId: string) => api<{ ok: boolean }>('fav_delete', { recipeId }),
+};
+
 /** Journal diététique personnel (une ligne par assiette). */
 export const dietApi = {
   list: (limit = 100) => api<{ entries: DietEntry[] }>('diet_list', { limit }, 'POST'),

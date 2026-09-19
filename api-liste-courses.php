@@ -60,6 +60,10 @@
         protein, carbs, fat, score, comment, hasPhoto}]
       GET  ?action=diet_photo {entryId} → JPEG (ses propres entrées,
         auth via header ou ?session= pour les <img>)
+      Recettes favorites :
+      POST ?action=fav_add {recipeId, title?, image?} → {ok}
+      GET  ?action=fav_list → [{recipeId, title, image, addedAt}]
+      POST ?action=fav_delete {recipeId} → {ok}
       POST ?action=diet_delete {entryId} (ses propres entrées)
       POST ?action=logout
 */
@@ -236,6 +240,17 @@ try {
     } catch (Throwable $e) { /* déjà présente */
     }
     $db->exec('CREATE INDEX IF NOT EXISTS idx_diet_user_day ON diet_entries(user_id, day)');
+    // Recettes MC favorites (par utilisateur).
+    $db->exec(
+        'CREATE TABLE IF NOT EXISTS favorite_recipes (
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            recipe_id TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT \'\',
+            image TEXT NOT NULL DEFAULT \'\',
+            added_at INTEGER NOT NULL,
+            PRIMARY KEY (user_id, recipe_id)
+        )'
+    );
 } catch (Throwable $e) {
     fail('SQLite indisponible (php-sqlite3 ? dossier data/ writable ?) : ' . $e->getMessage(), 500);
 }
@@ -1514,4 +1529,41 @@ if ($action === 'diet_delete') {
     out(['ok' => true]);
 }
 
-fail('Action inconnue (ping, register, login, join, me, logout, invite_rotate, family_set_gemini, lists_get, lists_create, lists_duplicate, lists_set_archived, lists_delete, items_add, items_add_many, items_toggle, items_update, items_delete, items_clear_checked, mc_recipe, mc_search, mc_session, mc_categories, diet_add, diet_list, diet_photo, diet_delete).', 400);
+if ($action === 'fav_add') {
+    $u = require_user($db);
+    $b = body();
+    $recipeId = trim((string) ($b['recipeId'] ?? ''));
+    if (!preg_match('/^\d{1,12}$/', $recipeId)) fail('ID recette invalide.', 400);
+    $title = trim((string) ($b['title'] ?? ''));
+    if (mb_strlen($title) > 120) $title = mb_substr($title, 0, 120);
+    $image = trim((string) ($b['image'] ?? ''));
+    if (mb_strlen($image) > 500) $image = mb_substr($image, 0, 500);
+    $db->prepare('INSERT OR REPLACE INTO favorite_recipes (user_id, recipe_id, title, image, added_at) VALUES (:u,:r,:t,:i,:a)')
+        ->execute([':u' => (int) $u['id'], ':r' => $recipeId, ':t' => $title, ':i' => $image, ':a' => time()]);
+    out(['ok' => true]);
+}
+
+if ($action === 'fav_list') {
+    $u = require_user($db);
+    $st = $db->prepare('SELECT recipe_id, title, image, added_at FROM favorite_recipes WHERE user_id = :u ORDER BY added_at DESC');
+    $st->execute([':u' => (int) $u['id']]);
+    $out = [];
+    while ($r = $st->fetch(PDO::FETCH_ASSOC)) {
+        $out[] = [
+            'recipeId' => (string) $r['recipe_id'], 'title' => (string) $r['title'],
+            'image' => (string) $r['image'], 'addedAt' => (int) $r['added_at'],
+        ];
+    }
+    out(['ok' => true, 'favorites' => $out]);
+}
+
+if ($action === 'fav_delete') {
+    $u = require_user($db);
+    $b = body();
+    $recipeId = trim((string) ($b['recipeId'] ?? ''));
+    $db->prepare('DELETE FROM favorite_recipes WHERE user_id = :u AND recipe_id = :r')
+        ->execute([':u' => (int) $u['id'], ':r' => $recipeId]);
+    out(['ok' => true]);
+}
+
+fail('Action inconnue (ping, register, login, join, me, logout, invite_rotate, family_set_gemini, lists_get, lists_create, lists_duplicate, lists_set_archived, lists_delete, items_add, items_add_many, items_toggle, items_update, items_delete, items_clear_checked, mc_recipe, mc_search, mc_session, mc_categories, diet_add, diet_list, diet_photo, diet_delete, fav_add, fav_list, fav_delete).', 400);
