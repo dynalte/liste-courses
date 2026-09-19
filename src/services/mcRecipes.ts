@@ -20,18 +20,33 @@ export interface McIngredientGroup {
   items: McIngredient[];
 }
 
+/** Détail cuisson structuré (icônes façon site MC). time en secondes. */
+export interface McCookDetail {
+  mode: string;
+  label: string;
+  temperature: number | null;
+  time: number | null;
+  speed: number | null;
+  weight: number | null;
+  reverse: boolean | null;
+  turbo: boolean;
+}
+
 export interface McRecipeStep {
   order: number;
   name: string;
   text: string;
-  /** Ligne de cuisson MC : "🔥 Rissoler · 130 °C · 4 min · Vitesse 1". */
+  /** Ligne de cuisson MC (compat) : "Rissoler · 130 °C · 4 min · Vitesse 1". */
   cook: string;
+  cookDetail?: McCookDetail | null;
 }
 
 export interface McRecipe {
   id: string;
   title: string;
   servings: string;
+  /** Pitch / texte de présentation de la recette (description MC). */
+  pitch?: string;
   groups: McIngredientGroup[];
   steps: McRecipeStep[];
   image: string;

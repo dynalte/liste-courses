@@ -1017,26 +1017,64 @@ function mc_guess_names(string $apiKey, string $model, string $title, array $kno
 }
 
 /**
- * Ligne de cuisson MC lisible depuis deviceSetting :
- * "🔥 Rissoler · 130 °C · 4 min · Vitesse 1 · ↩ sens inverse".
+ * Libellé de mode MC (comme le site : "Cuisson personnalisée", "Rissoler"...).
+ */
+function mc_cook_label(string $norm, $ds): string
+{
+    $labels = [
+        'scale' => 'Pesée', 'customized' => 'Cuisson personnalisée',
+        'roast' => 'Rissoler', 'slowcook' => 'Mijoter', 'slowcooking' => 'Mijoter',
+        'steam' => 'Vapeur', 'knead' => 'Pétrir', 'doughkneading' => 'Pétrir',
+        'sousvide' => 'Sous-vide', 'turbo' => 'Turbo',
+        'precleaning' => 'Prélavage', 'preclean' => 'Prélavage',
+        'fermentation' => 'Fermentation', 'ferment' => 'Fermentation',
+        'ricecooking' => 'Riz', 'ricecook' => 'Riz', 'rice' => 'Riz',
+        'foodprocessor' => 'Robot', 'puree' => 'Mixer', 'smoothie' => 'Smoothie',
+        'boil' => 'Bouillir', 'fry' => 'Frire',
+    ];
+    $raw = trim((string) (is_array($ds) ? ($ds['mode'] ?? '') : ''));
+    $label = $labels[$norm] ?? ($norm !== '' ? ucfirst($raw) : '');
+    return $label;
+}
+
+/**
+ * Détail cuisson structuré (pour les icônes façon site MC) :
+ * {mode, label, temperature, time, speed, weight, reverse, turbo}
+ * ou null si rien d'exploitable.
+ */
+function mc_cook_detail($ds): ?array
+{
+    if (!is_array($ds)) return null;
+    $norm = strtolower(str_replace(['-', '_', ' '], '', trim((string) ($ds['mode'] ?? ''))));
+    if ($norm === '') return null;
+    $s = [];
+    if (isset($ds['settings']) && is_array($ds['settings']) && isset($ds['settings'][0]) && is_array($ds['settings'][0])) {
+        $s = $ds['settings'][0];
+    }
+    $label = mc_cook_label($norm, $ds);
+    // "Cuisson personnalisée" seule sans réglages : rien à afficher.
+    if ($norm === 'customized' && empty($s)) return null;
+    $detail = ['mode' => $norm, 'label' => $label, 'temperature' => null, 'time' => null, 'speed' => null, 'weight' => null, 'reverse' => null, 'turbo' => !empty($ds['turbo'])];
+    $isScale = ($norm === 'scale');
+    if (!$isScale && isset($s['temperature']) && is_numeric($s['temperature'])) $detail['temperature'] = (float) $s['temperature'];
+    if (isset($s['time']) && is_numeric($s['time']) && (int) $s['time'] > 0) $detail['time'] = (int) $s['time'];
+    if (!$isScale && isset($s['speed']) && is_numeric($s['speed'])) $detail['speed'] = (int) $s['speed'];
+    if (isset($s['weight']) && is_numeric($s['weight']) && (float) $s['weight'] > 0) $detail['weight'] = (float) $s['weight'];
+    if (!$isScale && array_key_exists('reverse', $ds)) $detail['reverse'] = !empty($ds['reverse']);
+    if ($detail['temperature'] === null && $detail['time'] === null && $detail['speed'] === null && $detail['weight'] === null && $detail['reverse'] === null && ($label === '' || $isScale && $detail['weight'] === null)) return null;
+    return $detail;
+}
+
+/**
+ * Ligne de cuisson MC lisible depuis deviceSetting (compat) :
+ * "Rissoler · 130 °C · 4 min · Vitesse 1 · À droite".
  * time en secondes, weight en g. '' si rien d'exploitable.
  */
 function mc_cook_line($ds): string
 {
     if (!is_array($ds)) return '';
     $norm = strtolower(str_replace(['-', '_', ' '], '', trim((string) ($ds['mode'] ?? ''))));
-    $labels = [
-        'scale' => '⚖️ Pesée', 'customized' => '⚙️ Manuel',
-        'roast' => '🔥 Rissoler', 'slowcook' => '🍲 Mijoter', 'slowcooking' => '🍲 Mijoter',
-        'steam' => '♨️ Vapeur', 'knead' => '🍞 Pétrir', 'doughkneading' => '🍞 Pétrir',
-        'sousvide' => '🌡️ Sous-vide', 'turbo' => '🌀 Turbo',
-        'precleaning' => '🧽 Prélavage', 'preclean' => '🧽 Prélavage',
-        'fermentation' => '🌱 Fermentation', 'ferment' => '🌱 Fermentation',
-        'ricecooking' => '🍚 Riz', 'ricecook' => '🍚 Riz', 'rice' => '🍚 Riz',
-        'foodprocessor' => '🔪 Robot', 'puree' => '🥣 Mixer', 'smoothie' => '🥤 Smoothie',
-        'boil' => '💧 Bouillir', 'fry' => '🍳 Frire',
-    ];
-    $label = $labels[$norm] ?? ($norm !== '' ? ucfirst(trim((string) ($ds['mode'] ?? ''))) : '');
+    $label = mc_cook_label($norm, $ds);
     $s = [];
     if (isset($ds['settings']) && is_array($ds['settings']) && isset($ds['settings'][0]) && is_array($ds['settings'][0])) {
         $s = $ds['settings'][0];
@@ -1065,7 +1103,7 @@ function mc_cook_line($ds): string
     }
     // Sens de rotation toujours précisé (comme le site), sauf pesée.
     if (!$isScale && array_key_exists('reverse', $ds)) {
-        $parts[] = !empty($ds['reverse']) ? 'Rotation à gauche' : 'Rotation à droite';
+        $parts[] = !empty($ds['reverse']) ? 'À gauche' : 'À droite';
     }
     if (!empty($ds['turbo']) && $norm !== 'turbo') $parts[] = 'Turbo';
     return implode(' · ', $parts);
@@ -1087,12 +1125,39 @@ function mc_parse_steps(array $serving): array
         $text = trim((string) ($st['description'] ?? $st['text'] ?? ''));
         if (mb_strlen($name) > 120) $name = mb_substr($name, 0, 120);
         if (mb_strlen($text) > 800) $text = mb_substr($text, 0, 800);
-        $cook = mc_cook_line($st['deviceSetting'] ?? $st['mode'] ?? null);
+        $ds = $st['deviceSetting'] ?? $st['mode'] ?? null;
+        $cook = mc_cook_line($ds);
+        $cookDetail = mc_cook_detail($ds);
         if ($name === '' && $text === '' && $cook === '') continue;
         $ord = $st['order'] ?? $st['step'] ?? $n;
-        $steps[] = ['order' => is_numeric($ord) ? (int) $ord : $n, 'name' => $name, 'text' => $text, 'cook' => $cook];
+        $row = ['order' => is_numeric($ord) ? (int) $ord : $n, 'name' => $name, 'text' => $text, 'cook' => $cook];
+        if ($cookDetail !== null) $row['cookDetail'] = $cookDetail;
+        $steps[] = $row;
     }
     return $steps;
+}
+
+/**
+ * Pitch / texte de présentation de la recette (champ "description" côté MC).
+ * Tronqué à 600 caractères. '' si absent.
+ */
+function mc_pick_pitch(array $recipe, array $serving): string
+{
+    $cands = [];
+    foreach (['description', 'pitch', 'story', 'introduction', 'summary', 'teaser', 'comment'] as $k) {
+        if (isset($recipe[$k]) && is_string($recipe[$k])) $cands[] = trim($recipe[$k]);
+    }
+    // Repli : consigne du serving (souvent vide, mais certains brouillons l'utilisent).
+    if (isset($serving['instruction']) && is_string($serving['instruction'])) $cands[] = trim($serving['instruction']);
+    foreach ($cands as $c) {
+        $c = (string) preg_replace('/\s+/', ' ', $c);
+        $c = trim($c);
+        if ($c !== '') {
+            if (mb_strlen($c) > 600) $c = mb_substr($c, 0, 600) . '…';
+            return $c;
+        }
+    }
+    return '';
 }
 
 /**
@@ -1149,6 +1214,7 @@ if ($action === 'mc_recipe') {
 
     $title = '';
     $servings = '';
+    $pitch = '';
     $groups = null;
     $steps = [];
     $image = '';
@@ -1178,6 +1244,7 @@ if ($action === 'mc_recipe') {
                 if (is_numeric($serving['amount'] ?? null)) {
                     $servings = trim((string) $serving['amount'] . ' ' . trim((string) ($serving['unit'] ?? 'parts')));
                 }
+                if ($pitch === '') $pitch = mc_pick_pitch($recipe, $serving);
                 $steps = mc_parse_steps($serving);
                 $tmp = [];
                 $ig = (isset($serving['ingredientGroups']) && is_array($serving['ingredientGroups'])) ? $serving['ingredientGroups'] : [];
@@ -1230,6 +1297,7 @@ if ($action === 'mc_recipe') {
             if (is_numeric($serving['amount'] ?? null)) {
                 $servings = trim((string) $serving['amount'] . ' ' . trim((string) ($serving['servingUnit'] ?? $serving['unit'] ?? 'parts')));
             }
+            if ($pitch === '') $pitch = mc_pick_pitch($recipe, $serving);
             $steps = mc_parse_steps($serving);
             $gNames = [];
             $ig = (isset($serving['ingredientGroups']) && is_array($serving['ingredientGroups'])) ? $serving['ingredientGroups'] : [];
@@ -1307,7 +1375,7 @@ if ($action === 'mc_recipe') {
         fail('Recette ' . $id . ' introuvable (privé : ' . $authInfo . ' ; public : ' . $pubInfo . ').', 404);
     }
     if ($title === '') $title = 'Recette MC ' . $id;
-    out(['ok' => true, 'recipe' => ['id' => $id, 'title' => $title, 'servings' => $servings, 'groups' => $groups, 'steps' => $steps, 'image' => $image]]);
+    out(['ok' => true, 'recipe' => ['id' => $id, 'title' => $title, 'servings' => $servings, 'pitch' => $pitch, 'groups' => $groups, 'steps' => $steps, 'image' => $image]]);
 }
 
 if ($action === 'mc_categories') {

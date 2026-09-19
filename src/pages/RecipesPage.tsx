@@ -1,14 +1,128 @@
 import React, { useEffect, useState } from 'react';
 import {
   IonPage, IonHeader, IonToolbar, IonTitle, IonContent, IonList, IonItem,
-  IonLabel, IonCheckbox, IonButton, IonText, IonChip, IonToast,
+  IonLabel, IonCheckbox, IonButton, IonText, IonChip, IonToast, IonIcon,
   IonThumbnail, IonSearchbar, IonModal, IonButtons, IonFooter,
-  IonSegment, IonSegmentButton, IonIcon,
+  IonSegment, IonSegmentButton,
 } from '@ionic/react';
-import { heart, heartOutline } from 'ionicons/icons';
+import {
+  heart, heartOutline,
+  thermometerOutline, timerOutline, playForwardOutline, refreshOutline,
+  scaleOutline, flashOutline,
+} from 'ionicons/icons';
 import { listsApi, favApi, type ShoppingList, type FavRecipe } from '../services/serverApi';
-import { fetchMcRecipe, searchMcRecipes, fetchMcCategories, type McRecipe, type McSearchResult, type McCategory, type McSort } from '../services/mcRecipes';
+import { fetchMcRecipe, searchMcRecipes, fetchMcCategories, type McRecipe, type McSearchResult, type McCategory, type McSort, type McCookDetail } from '../services/mcRecipes';
 import { suggestRayon } from '../services/rayons';
+
+/** Toque de chef (contour, comme le site MC) pour le bandeau cuisson. */
+function ChefHatIcon({ size = 22 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M7.5 13.5c-2 0-3.6-1.5-3.6-3.4 0-1.9 1.5-3.4 3.4-3.6.4-1.9 2-3.4 4-3.6 2 .2 3.6 1.7 4 3.6 1.9.2 3.4 1.7 3.4 3.6 0 1.9-1.6 3.4-3.6 3.4" />
+      <path d="M7.5 13.5V19a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-5.5" />
+      <path d="M9.5 16.5h5" />
+    </svg>
+  );
+}
+
+function fmtTemp(t: number): string {
+  return `${Number.isInteger(t) ? t : t}°C`;
+}
+
+function fmtTime(sec: number): string {
+  if (sec < 60) return `${sec}Sec.`;
+  if (sec % 60 === 0) return `${sec / 60}min`;
+  return `${Math.floor(sec / 60)}min ${sec % 60}s`;
+}
+
+/**
+ * Bandeau cuisson façon site MC (cf. capture) :
+ * pilule « Cuisson personnalisée » + rangée d'icônes
+ * température · durée · vitesse · sens de rotation.
+ */
+function CookBadge({ detail, fallback }: { detail?: McCookDetail | null; fallback?: string }) {
+  if (!detail) {
+    if (!fallback) return null;
+    return <p><IonChip color="tertiary" style={{ margin: '4px 0 0' }}>{fallback}</IonChip></p>;
+  }
+  const items: React.ReactNode[] = [];
+  const iconStyle = { fontSize: 22, flexShrink: 0 } as const;
+  if (detail.mode !== 'scale' && detail.temperature !== null && detail.temperature !== undefined) {
+    items.push(
+      <span key="t" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+        <IonIcon icon={thermometerOutline} style={iconStyle} />
+        <span>{fmtTemp(detail.temperature)}</span>
+      </span>
+    );
+  }
+  if (detail.time !== null && detail.time !== undefined) {
+    items.push(
+      <span key="time" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+        <IonIcon icon={timerOutline} style={iconStyle} />
+        <span>{fmtTime(detail.time)}</span>
+      </span>
+    );
+  }
+  if (detail.mode !== 'scale' && detail.speed !== null && detail.speed !== undefined) {
+    items.push(
+      <span key="speed" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+        <IonIcon icon={playForwardOutline} style={iconStyle} />
+        <span>{detail.speed}</span>
+      </span>
+    );
+  }
+  if (detail.weight !== null && detail.weight !== undefined) {
+    items.push(
+      <span key="w" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+        <IonIcon icon={scaleOutline} style={iconStyle} />
+        <span>{detail.weight}g</span>
+      </span>
+    );
+  }
+  if (detail.mode !== 'scale' && detail.reverse !== null && detail.reverse !== undefined) {
+    items.push(
+      <span key="rev" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+        <IonIcon icon={refreshOutline} style={iconStyle} />
+        <span>{detail.reverse ? 'À gauche' : 'À droite'}</span>
+      </span>
+    );
+  }
+  if (detail.turbo) {
+    items.push(
+      <span key="turbo" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+        <IonIcon icon={flashOutline} style={iconStyle} />
+        <span>Turbo</span>
+      </span>
+    );
+  }
+  if (!detail.label && items.length === 0) {
+    if (!fallback) return null;
+    return <p><IonChip color="tertiary" style={{ margin: '4px 0 0' }}>{fallback}</IonChip></p>;
+  }
+  return (
+    <div style={{ margin: '6px 0 2px' }}>
+      {detail.label ? (
+        <span style={{
+          display: 'inline-flex', alignItems: 'center', gap: 8,
+          border: '1.5px solid #d5dbe2', borderRadius: 999, padding: '6px 18px 6px 12px',
+          fontWeight: 700, fontSize: 16, color: '#1c2733', background: '#fff',
+        }}>
+          <ChefHatIcon size={24} />
+          {detail.label}
+        </span>
+      ) : null}
+      {items.length > 0 ? (
+        <div style={{
+          display: 'flex', flexWrap: 'wrap', gap: '6px 20px',
+          padding: '10px 4px 0', color: '#2e4468', fontSize: 14, fontWeight: 500,
+        }}>
+          {items}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 /**
  * Basiques déjà chez tout le monde : non pré-cochés à l'import recette
@@ -342,6 +456,9 @@ const RecipesPage: React.FC = () => {
                     style={{ width: '100%', borderRadius: 12, marginBottom: 8, display: 'block' }}
                   />
                 ) : null}
+                {recipe.pitch ? (
+                  <IonText><p style={{ margin: '0 0 8px', fontSize: 14, lineHeight: 1.5 }}>{recipe.pitch}</p></IonText>
+                ) : null}
                 {recipe.servings ? <IonText color="medium"><p style={{ marginTop: 0 }}>{recipe.servings} • {recipe.groups.flatMap((g) => g.items).length} ingrédient(s)</p></IonText> : null}
                 {err && <IonText color="danger"><p>{err}</p></IonText>}
                 <IonSegment
@@ -409,7 +526,7 @@ const RecipesPage: React.FC = () => {
                       <IonLabel>
                         <h2>{i + 1}. {st.name || `Étape ${i + 1}`}</h2>
                         {st.text ? <p style={{ whiteSpace: 'pre-wrap' }}>{st.text}</p> : null}
-                        {st.cook ? <p><IonChip color="tertiary" style={{ margin: '4px 0 0' }}>{st.cook}</IonChip></p> : null}
+                        <CookBadge detail={st.cookDetail} fallback={st.cook} />
                       </IonLabel>
                     </IonItem>
                   ))}
