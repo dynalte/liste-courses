@@ -53,6 +53,14 @@
       POST ?action=mc_categories {lang?} → catégories MC : [{id, name}]
       POST ?action=mc_session {cookie, lang?} → valide la session MC :
         {user} (distingue cookie invalide / recette introuvable)
+      Journal diététique personnel :
+      POST ?action=diet_add {day, meal, dish, items, kcal, protein, carbs,
+        fat, score, comment} → {id} (day = AAAA-MM-JJ)
+      GET  ?action=diet_list {limit?} → [{id, day, meal, dish, items, kcal,
+        protein, carbs, fat, score, comment, hasPhoto}]
+      GET  ?action=diet_photo {entryId} → JPEG (ses propres entrées,
+        auth via header ou ?session= pour les <img>)
+      POST ?action=diet_delete {entryId} (ses propres entrées)
       POST ?action=logout
 */
 declare(strict_types=1);
@@ -203,6 +211,31 @@ try {
         )'
     );
     $db->exec('CREATE INDEX IF NOT EXISTS idx_activity_family ON activity(family_id, id)');
+    // Suivi diététique personnel : une ligne par assiette photographiée
+    // (plat + aliments + estimation nutritionnelle IA + photo réduite).
+    $db->exec(
+        'CREATE TABLE IF NOT EXISTS diet_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            day TEXT NOT NULL,
+            meal TEXT NOT NULL DEFAULT \'\',
+            dish TEXT NOT NULL DEFAULT \'\',
+            items TEXT NOT NULL DEFAULT \'[]\',
+            kcal REAL NOT NULL DEFAULT 0,
+            protein REAL NOT NULL DEFAULT 0,
+            carbs REAL NOT NULL DEFAULT 0,
+            fat REAL NOT NULL DEFAULT 0,
+            score INTEGER NOT NULL DEFAULT 0,
+            comment TEXT NOT NULL DEFAULT \'\',
+            photo TEXT NOT NULL DEFAULT \'\',
+            created_at INTEGER NOT NULL
+        )'
+    );
+    try {
+        $db->exec("ALTER TABLE diet_entries ADD COLUMN photo TEXT NOT NULL DEFAULT ''");
+    } catch (Throwable $e) { /* déjà présente */
+    }
+    $db->exec('CREATE INDEX IF NOT EXISTS idx_diet_user_day ON diet_entries(user_id, day)');
 } catch (Throwable $e) {
     fail('SQLite indisponible (php-sqlite3 ? dossier data/ writable ?) : ' . $e->getMessage(), 500);
 }
@@ -1380,4 +1413,105 @@ if ($action === 'mc_search') {
         'currentPage' => (int) ($dd['currentPage'] ?? $page), 'recipes' => $out]);
 }
 
-fail('Action inconnue (ping, register, login, join, me, logout, invite_rotate, family_set_gemini, lists_get, lists_create, lists_duplicate, lists_set_archived, lists_delete, items_add, items_add_many, items_toggle, items_update, items_delete, items_clear_checked, mc_recipe, mc_search, mc_session, mc_categories).', 400);
+if ($action === 'diet_add') {
+    $u = require_user($db);
+    $b = body();
+    $day = trim((string) ($b['day'] ?? ''));
+    $meal = trim((string) ($b['meal'] ?? ''));
+    $dish = trim((string) ($b['dish'] ?? ''));
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $day)) fail('Date invalide (AAAA-MM-JJ).', 400);
+    $meals = ['Petit-déjeuner', 'Déjeuner', 'Goûter', 'Dîner', 'Collation'];
+    if (!in_array($meal, $meals, true)) $meal = 'Déjeuner';
+    if (mb_strlen($dish) > 120) $dish = mb_substr($dish, 0, 120);
+    $items = [];
+    $rawItems = $b['items'] ?? [];
+    if (is_array($rawItems)) {
+        foreach (array_slice($rawItems, 0, 20) as $n) {
+            $nm = trim((string) (is_array($n) ? ($n['name'] ?? '') : $n));
+            if ($nm === '') continue;
+            if (mb_strlen($nm) > 120) $nm = mb_substr($nm, 0, 120);
+            $qty = trim((string) (is_array($n) ? ($n['qty'] ?? '') : ''));
+            if (mb_strlen($qty) > 30) $qty = mb_substr($qty, 0, 30);
+            $items[] = ['name' => $nm, 'qty' => $qty];
+        }
+    }
+    if ($dish === '' && count($items) === 0) fail('Plat ou aliments requis.', 400);
+    $num = function ($v) {
+        $f = (float) $v;
+        if ($f < 0) $f = 0;
+        if ($f > 100000) $f = 100000;
+        return round($f, 1);
+    };
+    $score = (int) ($b['score'] ?? 0);
+    if ($score < 0) $score = 0;
+    if ($score > 100) $score = 100;
+    $comment = trim((string) ($b['comment'] ?? ''));
+    if (mb_strlen($comment) > 300) $comment = mb_substr($comment, 0, 300);
+    // Photo réduite (JPEG base64, ~480px) : plafonnée à 200 Ko, sinon ignorée.
+    $photo = (string) ($b['photo'] ?? '');
+    if (strpos($photo, ',') !== false) $photo = substr($photo, (int) strpos($photo, ',') + 1);
+    $photo = trim($photo);
+    if (mb_strlen($photo) > 280000 || $photo !== '' && base64_decode($photo, true) === false) $photo = '';
+    $db->prepare('INSERT INTO diet_entries (user_id, day, meal, dish, items, kcal, protein, carbs, fat, score, comment, photo, created_at) VALUES (:u,:d,:m,:dish,:it,:k,:p,:c,:f,:s,:com,:ph,:t)')
+        ->execute([
+            ':u' => (int) $u['id'], ':d' => $day, ':m' => $meal, ':dish' => $dish,
+            ':it' => json_encode($items, JSON_UNESCAPED_UNICODE),
+            ':k' => $num($b['kcal'] ?? 0), ':p' => $num($b['protein'] ?? 0),
+            ':c' => $num($b['carbs'] ?? 0), ':f' => $num($b['fat'] ?? 0),
+            ':s' => $score, ':com' => $comment, ':ph' => $photo, ':t' => time(),
+        ]);
+    out(['ok' => true, 'id' => (int) $db->lastInsertId()]);
+}
+
+if ($action === 'diet_list') {
+    $u = require_user($db);
+    $b = body();
+    $limit = (int) ($b['limit'] ?? 100);
+    if ($limit < 1) $limit = 1;
+    if ($limit > 200) $limit = 200;
+    $st = $db->prepare('SELECT * FROM diet_entries WHERE user_id = :u ORDER BY day DESC, id DESC LIMIT ' . $limit);
+    $st->execute([':u' => (int) $u['id']]);
+    $out = [];
+    while ($r = $st->fetch(PDO::FETCH_ASSOC)) {
+        $items = json_decode((string) ($r['items'] ?? '[]'), true);
+        $out[] = [
+            'id' => (int) $r['id'], 'day' => (string) $r['day'], 'meal' => (string) $r['meal'],
+            'dish' => (string) $r['dish'], 'items' => is_array($items) ? $items : [],
+            'kcal' => (float) $r['kcal'], 'protein' => (float) $r['protein'],
+            'carbs' => (float) $r['carbs'], 'fat' => (float) $r['fat'],
+            'score' => (int) $r['score'], 'comment' => (string) $r['comment'],
+            'hasPhoto' => trim((string) ($r['photo'] ?? '')) !== '',
+        ];
+    }
+    out(['ok' => true, 'entries' => $out]);
+}
+
+if ($action === 'diet_photo') {
+    // Photo JPEG d'une entrée (ses propres entrées). Utilisable en <img>
+    // avec ?session= (X-Session-Token impossible dans une URL d'image).
+    $u = require_user($db);
+    $entryId = (int) (($_GET['entryId'] ?? 0) ?: (body()['entryId'] ?? 0));
+    $st = $db->prepare('SELECT photo FROM diet_entries WHERE id = :id AND user_id = :u');
+    $st->execute([':id' => $entryId, ':u' => (int) $u['id']]);
+    $r = $st->fetch(PDO::FETCH_ASSOC);
+    $bin = ($r && trim((string) ($r['photo'] ?? '')) !== '') ? base64_decode((string) $r['photo'], true) : false;
+    if ($bin === false || $bin === '') fail('Photo introuvable.', 404);
+    header('Content-Type: image/jpeg');
+    header('Content-Length: ' . strlen($bin));
+    header('Cache-Control: private, max-age=86400');
+    echo $bin;
+    exit;
+}
+
+if ($action === 'diet_delete') {
+    $u = require_user($db);
+    $b = body();
+    $entryId = (int) ($b['entryId'] ?? 0);
+    $st = $db->prepare('SELECT id FROM diet_entries WHERE id = :id AND user_id = :u');
+    $st->execute([':id' => $entryId, ':u' => (int) $u['id']]);
+    if (!$st->fetch()) fail('Entrée introuvable.', 404);
+    $db->prepare('DELETE FROM diet_entries WHERE id = :id')->execute([':id' => $entryId]);
+    out(['ok' => true]);
+}
+
+fail('Action inconnue (ping, register, login, join, me, logout, invite_rotate, family_set_gemini, lists_get, lists_create, lists_duplicate, lists_set_archived, lists_delete, items_add, items_add_many, items_toggle, items_update, items_delete, items_clear_checked, mc_recipe, mc_search, mc_session, mc_categories, diet_add, diet_list, diet_photo, diet_delete).', 400);

@@ -4,12 +4,13 @@ import { IonApp, IonRouterOutlet, IonTabs, IonTabBar, IonTabButton, IonIcon, Ion
 // (/courses/) sans rewrite serveur, et à l'identique sous Capacitor.
 import { IonReactHashRouter } from '@ionic/react-router';
 import { Redirect, Route } from 'react-router-dom';
-import { cartOutline, cameraOutline, restaurantOutline, settingsOutline } from 'ionicons/icons';
+import { cartOutline, cameraOutline, restaurantOutline, nutritionOutline, settingsOutline } from 'ionicons/icons';
 
 import AuthPage from './pages/AuthPage';
 import ListsPage from './pages/ListsPage';
 import FridgePage from './pages/FridgePage';
 import RecipesPage from './pages/RecipesPage';
+import DietPage from './pages/DietPage';
 import SettingsPage from './pages/SettingsPage';
 import { settings } from './services/settings';
 import { syncFamilyGemini } from './services/serverApi';
@@ -38,6 +39,7 @@ const App: React.FC = () => {
             <Route exact path="/listes"><ListsPage /></Route>
             <Route exact path="/frigo"><FridgePage /></Route>
             <Route exact path="/recettes"><RecipesPage /></Route>
+            <Route exact path="/diet"><DietPage /></Route>
             <Route exact path="/reglages"><SettingsPage onLogout={() => setAuthed(false)} /></Route>
             <Route exact path="/"><Redirect to="/listes" /></Route>
           </IonRouterOutlet>
@@ -53,6 +55,10 @@ const App: React.FC = () => {
             <IonTabButton tab="recettes" href="/recettes">
               <IonIcon icon={restaurantOutline} />
               <IonLabel>Recettes</IonLabel>
+            </IonTabButton>
+            <IonTabButton tab="diet" href="/diet">
+              <IonIcon icon={nutritionOutline} />
+              <IonLabel>Diététique</IonLabel>
             </IonTabButton>
             <IonTabButton tab="reglages" href="/reglages">
               <IonIcon icon={settingsOutline} />

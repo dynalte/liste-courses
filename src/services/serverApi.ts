@@ -155,6 +155,38 @@ export interface NewItem {
   rayon?: string;
 }
 
+export interface DietEntry {
+  id: number;
+  day: string;
+  meal: string;
+  dish: string;
+  items: Array<{ name: string; qty: string }>;
+  kcal: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  score: number;
+  comment: string;
+  hasPhoto: boolean;
+}
+
+/** Journal diététique personnel (une ligne par assiette). */
+export const dietApi = {
+  list: (limit = 100) => api<{ entries: DietEntry[] }>('diet_list', { limit }, 'POST'),
+  add: (e: {
+    day: string; meal: string; dish: string;
+    items: Array<{ name: string; qty: string }>;
+    kcal: number; protein: number; carbs: number; fat: number;
+    score: number; comment: string;
+    /** JPEG réduit base64 (sans préfixe), facultatif. */
+    photo?: string;
+  }) => api<{ id: number }>('diet_add', e),
+  remove: (entryId: number) => api<{ ok: boolean }>('diet_delete', { entryId }),
+  /** URL <img> de la photo (auth via ?session=, les headers étant impossibles). */
+  photoUrl: (entryId: number) =>
+    `${settings.apiURL}?action=diet_photo&entryId=${entryId}&session=${encodeURIComponent(settings.sessionToken)}`,
+};
+
 export const listsApi = {
   get: () => api<{ lists: ShoppingList[]; activity: ActivityEvent[]; you: number; youRole: string }>('lists_get'),
   create: (name: string) => api<{ list: ShoppingList }>('lists_create', { name }),

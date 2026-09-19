@@ -2,8 +2,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   IonPage, IonHeader, IonToolbar, IonTitle, IonContent, IonButton, IonCard,
   IonCardContent, IonCardHeader, IonCardTitle, IonText, IonTextarea, IonItem,
-  IonLabel, IonSelect, IonSelectOption, IonSpinner, IonChip,
+  IonLabel, IonSelect, IonSelectOption, IonSpinner, IonChip, IonFooter,
+  IonIcon,
 } from '@ionic/react';
+import { cameraOutline, videocamOutline, imageOutline, sparklesOutline } from 'ionicons/icons';
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Capacitor } from '@capacitor/core';
 import { analyzeFridgePhoto, downscaleToBase64, extractVideoFrames, type FridgeAnalysis } from '../services/fridgeAi';
@@ -209,19 +211,14 @@ const FridgePage: React.FC = () => {
     <IonPage>
       <IonHeader><IonToolbar><IonTitle>Frigo → IA</IonTitle></IonToolbar></IonHeader>
       <IonContent className="ion-padding">
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <IonButton onClick={() => void handleFridgePhoto()}>📷 Photo frigo</IonButton>
-          <IonButton fill="outline" onClick={() => videoInput.current?.click()} disabled={busy}>🎥 Filmer</IonButton>
-          <IonButton fill="outline" onClick={() => takePhoto(CameraSource.Photos)}>🖼 Galerie</IonButton>
-          <input
-            ref={videoInput}
-            type="file"
-            accept="video/*"
-            capture="environment"
-            hidden
-            onChange={(e) => void handleVideoFile(e.target.files?.[0])}
-          />
-        </div>
+        <input
+          ref={videoInput}
+          type="file"
+          accept="video/*"
+          capture="environment"
+          hidden
+          onChange={(e) => void handleVideoFile(e.target.files?.[0])}
+        />
         {images.length > 0 && (
           <>
             {isVideo ? (
@@ -248,9 +245,6 @@ const FridgePage: React.FC = () => {
         <IonItem style={{ marginTop: 12 }}>
           <IonTextarea label="Contexte (optionnel)" placeholder="Ex : famille de 4, pas de porc…" value={hint} onIonInput={(e) => setHint(e.detail.value ?? '')} />
         </IonItem>
-        <IonButton expand="block" style={{ marginTop: 12 }} onClick={analyze} disabled={busy || images.length === 0}>
-          {busy ? <IonSpinner /> : 'Analyser avec Gemini'}
-        </IonButton>
         {error && <IonText color="danger"><p>{error}</p></IonText>}
         {addedMsg && <IonText color="success"><p>{addedMsg}</p></IonText>}
         {result && (
@@ -285,6 +279,28 @@ const FridgePage: React.FC = () => {
         )}
         <p className="status-bar">Photo ou vidéo sans son : tout est envoyé à Gemini avec ta clé (Réglages). Rien n’est stocké sur le serveur PHP. Astuce : filme lentement de haut en bas pour couvrir toutes les étagères.</p>
       </IonContent>
+      <IonFooter>
+        <IonToolbar>
+          <div className="action-bar">
+            <IonButton fill="outline" onClick={() => void handleFridgePhoto()} disabled={busy} title="Photographier le frigo">
+              <IonIcon icon={cameraOutline} slot="start" />
+              Photo
+            </IonButton>
+            <IonButton fill="outline" onClick={() => videoInput.current?.click()} disabled={busy} title="Filmer le frigo">
+              <IonIcon icon={videocamOutline} slot="start" />
+              Filmer
+            </IonButton>
+            <IonButton fill="outline" onClick={() => takePhoto(CameraSource.Photos)} disabled={busy} title="Choisir depuis la galerie">
+              <IonIcon icon={imageOutline} slot="start" />
+              Galerie
+            </IonButton>
+            <IonButton onClick={analyze} disabled={busy || images.length === 0} title="Analyser avec Gemini">
+              <IonIcon icon={sparklesOutline} slot="start" />
+              {busy ? <IonSpinner /> : 'Analyser'}
+            </IonButton>
+          </div>
+        </IonToolbar>
+      </IonFooter>
       {/* Overlays hors du contenu scrollable : calés à l'écran, au-dessus du menu. */}
       {capturing && (
         <CaptureOverlay busy={busy} hint="Cadre le frigo puis capture." onSnap={() => void handleSnap()} onCancel={() => void handleCancelCapture()} />

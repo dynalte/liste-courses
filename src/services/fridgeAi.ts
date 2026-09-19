@@ -330,6 +330,70 @@ export async function analyzeHandwrittenList(jpegBase64: string): Promise<Handwr
   }
 }
 
+export interface PlateFood {
+  name: string;
+  qty: string;
+}
+
+export interface PlateAnalysis {
+  /** Nom du plat ("Poulet rôti + riz + haricots verts"). Vide si pas d'assiette. */
+  dish: string;
+  foods: PlateFood[];
+  /** Totaux estimés pour l'assiette entière. */
+  kcal: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  /** Note diététique /100 (équilibre, légumes, protéines, transformation, sucres). */
+  score: number;
+  comment: string;
+}
+
+/**
+ * Analyse une assiette photographiée : nom du plat, aliments + quantités
+ * approximatives, estimation nutritionnelle et note diététique /100.
+ */
+export async function analyzePlatePhoto(jpegBase64: string): Promise<PlateAnalysis> {
+  const img = (jpegBase64 || '').trim();
+  if (!img) throw new FridgeAiError('Aucune image à analyser.');
+  const prompt =
+    `Analyse cette photo d'une assiette (ou d'un repas). ` +
+    `1) Nomme le plat en français. ` +
+    `2) Liste chaque aliment visible avec sa quantité approximative en grammes ou parts ` +
+    `(ex : "150 g", "1 part", "2 c.à.s", sinon chaîne vide). ` +
+    `3) Estime pour l'assiette ENTIÈRE : calories (kcal), protéines, glucides, lipides (en grammes). ` +
+    `4) Donne une note diététique sur 100 (équilibre assiette, légumes, protéines, aliments ultra-transformés, sucres/gras) + 1 phrase de conseil. ` +
+    `Si ce n'est pas un repas, réponds {"dish": "", "foods": [], "kcal": 0, "protein": 0, "carbs": 0, "fat": 0, "score": 0, "comment": ""}.` +
+    `\nRéponds UNIQUEMENT en JSON valide, sans markdown : ` +
+    `{"dish": "...", "foods": [{"name": "...", "qty": "..."}], "kcal": 0, "protein": 0, "carbs": 0, "fat": 0, "score": 0, "comment": "..."}. ` +
+    `Max 15 aliments. Nombres positifs, réalistes.`;
+  const text = await geminiVisionJson(prompt, [img]);
+  const empty: PlateAnalysis = { dish: '', foods: [], kcal: 0, protein: 0, carbs: 0, fat: 0, score: 0, comment: '' };
+  try {
+    const parsed = extractJsonObject<Partial<PlateAnalysis>>(text);
+    const num = (v: unknown) => {
+      const f = typeof v === 'number' ? v : parseFloat(String(v ?? ''));
+      return Number.isFinite(f) && f >= 0 ? Math.round(f * 10) / 10 : 0;
+    };
+    const foods = Array.isArray(parsed.foods) ? parsed.foods : [];
+    const score = Math.round(num(parsed.score));
+    return {
+      dish: String(parsed.dish ?? '').trim().slice(0, 120),
+      foods: foods
+        .map((s: any) => ({ name: String(s?.name ?? '').trim(), qty: String(s?.qty ?? '').trim() }))
+        .filter((s) => s.name)
+        .slice(0, 15),
+      kcal: num(parsed.kcal),
+      protein: num(parsed.protein),
+      carbs: num(parsed.carbs),
+      fat: num(parsed.fat),
+      score: Math.min(100, Math.max(0, score)),
+      comment: String(parsed.comment ?? '').trim().slice(0, 300),
+    };
+  } catch {
+    throw new FridgeAiError('Réponse IA inattendue. Relance dans un moment.');
+  }
+}
 export interface RecognizedProduct {
   /** Nom court + marque si lisible ("Yaourt nature (Danone)"). Vide si non reconnu. */
   name: string;

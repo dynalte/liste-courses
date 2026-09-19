@@ -1,13 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import {
   IonPage, IonHeader, IonToolbar, IonTitle, IonContent, IonList, IonItem,
-  IonLabel, IonCheckbox, IonInput, IonButton, IonText, IonChip, IonToast,
+  IonLabel, IonCheckbox, IonButton, IonText, IonChip, IonToast,
   IonThumbnail, IonSearchbar, IonModal, IonButtons, IonFooter,
   IonSegment, IonSegmentButton,
 } from '@ionic/react';
 import { listsApi, type ShoppingList } from '../services/serverApi';
-import { fetchMcRecipe, openMcLogin, searchMcRecipes, fetchMcCategories, type McRecipe, type McSearchResult, type McCategory, type McSort } from '../services/mcRecipes';
-import { settings } from '../services/settings';
+import { fetchMcRecipe, searchMcRecipes, fetchMcCategories, type McRecipe, type McSearchResult, type McCategory, type McSort } from '../services/mcRecipes';
 import { suggestRayon } from '../services/rayons';
 
 /**
@@ -18,7 +17,6 @@ import { suggestRayon } from '../services/rayons';
  * Requiert le cookie MC (Réglages) : session Lidl Plus, jamais stockée serveur.
  */
 const RecipesPage: React.FC = () => {
-  const [url, setUrl] = useState('');
   const [recipe, setRecipe] = useState<McRecipe | null>(null);
   const [checked, setChecked] = useState<Set<string>>(new Set());
   /** Catalogue public : recherche + parcours (sans cookie). */
@@ -41,7 +39,6 @@ const RecipesPage: React.FC = () => {
   /** Onglet de la popin recette : ingrédients (ajout liste) ou pas-à-pas. */
   const [detailTab, setDetailTab] = useState<'items' | 'steps'>('items');
 
-  const hasCookie = settings.mcCookie !== '';
   const actives = lists.filter((l) => !l.archived && !l.isTemplate);
   const active = actives.find((l) => l.id === activeId) ?? actives[0] ?? null;
 
@@ -145,17 +142,6 @@ const RecipesPage: React.FC = () => {
     <IonPage>
       <IonHeader><IonToolbar><IonTitle>Recettes MC <span style={{ fontSize: 12, opacity: 0.6 }}>bêta</span></IonTitle></IonToolbar></IonHeader>
       <IonContent className="ion-padding">
-        {!hasCookie && (
-          <p className="status-bar">
-            ℹ️ Sans cookie, les recettes du catalogue passent quand même.
-            Le cookie (Réglages &gt; Monsieur Cuisine) ne sert que pour tes brouillons privés.
-          </p>
-        )}
-        {!hasCookie && (
-          <IonButton expand="block" fill="outline" onClick={() => void openMcLogin()}>
-            Se connecter à Monsieur Cuisine
-          </IonButton>
-        )}
         <IonSearchbar
           placeholder="Rechercher une recette (ex : risotto)"
           value={searchQ}
@@ -194,7 +180,7 @@ const RecipesPage: React.FC = () => {
             <p className="cal-heading">📖 {total} recette(s)</p>
             <IonList>
               {results.map((r) => (
-                <IonItem key={r.id} button onClick={() => { setUrl(r.id); void loadRecipe(r.id); }}>
+                <IonItem key={r.id} button onClick={() => void loadRecipe(r.id)}>
                   {r.image ? <IonThumbnail slot="start"><img src={r.image} alt="" loading="lazy" /></IonThumbnail> : null}
                   <IonLabel>
                     <h2>{r.name}</h2>
@@ -214,15 +200,6 @@ const RecipesPage: React.FC = () => {
             )}
           </>
         )}
-        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-          <IonInput
-            placeholder="…ou URL recette / ID (ex : …?recipe-id=…)"
-            value={url}
-            onIonInput={(e) => setUrl(e.detail.value ?? '')}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !loading) void loadRecipe(url); }}
-          />
-          <IonButton onClick={() => void loadRecipe(url)} disabled={loading}>{loading ? '…' : 'Charger'}</IonButton>
-        </div>
         {err && !recipe && <IonText color="danger"><p>{err}</p></IonText>}
 
         {/* Détail recette en popin par-dessus la recherche. */}
