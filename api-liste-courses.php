@@ -56,8 +56,8 @@
       Journal diététique personnel :
       POST ?action=diet_add {day, meal, dish, items, kcal, protein, carbs,
         fat, score, comment} → {id} (day = AAAA-MM-JJ)
-      GET  ?action=diet_list {limit?} → [{id, day, meal, dish, items, kcal,
-        protein, carbs, fat, score, comment, hasPhoto}]
+      GET  ?action=diet_list {limit?, from?, to?} → [{id, day, meal, dish, items, kcal,
+        protein, carbs, fat, score, comment, hasPhoto}] (from/to = AAAA-MM-JJ)
       GET  ?action=diet_photo {entryId} → JPEG (ses propres entrées,
         auth via header ou ?session= pour les <img>)
       Recettes favorites :
@@ -1667,11 +1667,23 @@ if ($action === 'diet_add') {
 if ($action === 'diet_list') {
     $u = require_user($db);
     $b = body();
-    $limit = (int) ($b['limit'] ?? 100);
+    $limit = (int) ($b['limit'] ?? 200);
     if ($limit < 1) $limit = 1;
-    if ($limit > 200) $limit = 200;
-    $st = $db->prepare('SELECT * FROM diet_entries WHERE user_id = :u ORDER BY day DESC, id DESC LIMIT ' . $limit);
-    $st->execute([':u' => (int) $u['id']]);
+    if ($limit > 500) $limit = 500;
+    $where = 'user_id = :u';
+    $params = [':u' => (int) $u['id']];
+    $from = trim((string) ($b['from'] ?? ''));
+    $to = trim((string) ($b['to'] ?? ''));
+    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $from)) {
+        $where .= ' AND day >= :from';
+        $params[':from'] = $from;
+    }
+    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $to)) {
+        $where .= ' AND day <= :to';
+        $params[':to'] = $to;
+    }
+    $st = $db->prepare('SELECT * FROM diet_entries WHERE ' . $where . ' ORDER BY day DESC, id DESC LIMIT ' . $limit);
+    $st->execute($params);
     $out = [];
     while ($r = $st->fetch(PDO::FETCH_ASSOC)) {
         $items = json_decode((string) ($r['items'] ?? '[]'), true);

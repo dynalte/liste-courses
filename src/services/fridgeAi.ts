@@ -394,6 +394,55 @@ export async function analyzePlatePhoto(jpegBase64: string): Promise<PlateAnalys
     throw new FridgeAiError('Réponse IA inattendue. Relance dans un moment.');
   }
 }
+
+/**
+ * Estime un repas DÉCRIT en texte (sans photo) : même sortie que
+ * analyzePlatePhoto. Quantités supposées standard si absentes
+ * ("poulet + riz" → part moyenne) — l'utilisateur ajuste ensuite.
+ */
+export async function analyzeMealText(description: string): Promise<PlateAnalysis> {
+  const desc = (description || '').trim().slice(0, 500);
+  if (!desc) throw new FridgeAiError('Décris ton assiette en quelques mots.');
+  const prompt =
+    `Un utilisateur décrit son repas ainsi : « ${desc} ». ` +
+    `1) Nomme le plat en français. ` +
+    `2) Détaille chaque aliment avec sa quantité la plus probable en grammes ou parts ` +
+    `(portions moyennes standard si non précisées ; ex : "150 g", "1 part"). ` +
+    `3) Estime pour le repas ENTIER : calories (kcal), protéines, glucides, lipides (en grammes). ` +
+    `4) Donne une note diététique sur 100 (équilibre, légumes, protéines, transformation, sucres) + 1 phrase de conseil. ` +
+    `\nRéponds UNIQUEMENT en JSON valide, sans markdown : ` +
+    `{"dish": "...", "foods": [{"name": "...", "qty": "..."}], "kcal": 0, "protein": 0, "carbs": 0, "fat": 0, "score": 0, "comment": "..."}. ` +
+    `Max 15 aliments. Nombres positifs, réalistes.`;
+  const text = await geminiVisionJson(prompt, []);
+  const empty: PlateAnalysis = { dish: '', foods: [], kcal: 0, protein: 0, carbs: 0, fat: 0, score: 0, comment: '' };
+  try {
+    const parsed = extractJsonObject<Partial<PlateAnalysis>>(text);
+    const num = (v: unknown) => {
+      const f = typeof v === 'number' ? v : parseFloat(String(v ?? ''));
+      return Number.isFinite(f) && f >= 0 ? Math.round(f * 10) / 10 : 0;
+    };
+    const foods = Array.isArray(parsed.foods) ? parsed.foods : [];
+    const score = Math.round(num(parsed.score));
+    const out: PlateAnalysis = {
+      dish: String(parsed.dish ?? '').trim().slice(0, 120) || desc.slice(0, 120),
+      foods: foods
+        .map((s: any) => ({ name: String(s?.name ?? '').trim(), qty: String(s?.qty ?? '').trim() }))
+        .filter((s) => s.name)
+        .slice(0, 15),
+      kcal: num(parsed.kcal),
+      protein: num(parsed.protein),
+      carbs: num(parsed.carbs),
+      fat: num(parsed.fat),
+      score: Math.min(100, Math.max(0, score)),
+      comment: String(parsed.comment ?? '').trim().slice(0, 300),
+    };
+    if (out.foods.length === 0) throw new FridgeAiError('Description inexploitable.');
+    return out;
+  } catch (e) {
+    if (e instanceof FridgeAiError) throw e;
+    throw new FridgeAiError('Réponse IA inattendue. Relance dans un moment.');
+  }
+}
 export interface RecognizedProduct {
   /** Nom court + marque si lisible ("Yaourt nature (Danone)"). Vide si non reconnu. */
   name: string;

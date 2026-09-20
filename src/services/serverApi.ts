@@ -187,7 +187,8 @@ export const favApi = {
 
 /** Journal diététique personnel (une ligne par assiette). */
 export const dietApi = {
-  list: (limit = 100) => api<{ entries: DietEntry[] }>('diet_list', { limit }, 'POST'),
+  list: (limit = 200, from = '', to = '') =>
+    api<{ entries: DietEntry[] }>('diet_list', { limit, from, to }, 'POST'),
   add: (e: {
     day: string; meal: string; dish: string;
     items: Array<{ name: string; qty: string }>;

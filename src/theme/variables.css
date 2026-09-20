@@ -374,6 +374,33 @@ h3 {
   --border-radius: 0;
 }
 
+/* ---------- Résumé repas diététique : côte à côte sur large, empilé sur téléphone ---------- */
+.meal-summary {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin: 4px 0 8px 12px;
+}
+.meal-summary .meal-comment {
+  font-size: 13px;
+  flex: 1;
+  min-width: 0;
+}
+.meal-summary .meal-comment p {
+  margin: 0;
+}
+@media (max-width: 600px) {
+  .meal-summary {
+    flex-direction: column;
+    align-items: flex-start;
+    margin-left: 0;
+  }
+  .meal-summary .meal-comment {
+    flex: none;
+    width: 100%;
+  }
+}
+
 /* ---------- Filming natif (camera-preview par-dessus) : masque le chrome ---------- */
 html.camera-preview-active ion-header,
 html.camera-preview-active ion-tab-bar {
